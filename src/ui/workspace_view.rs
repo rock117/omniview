@@ -12,6 +12,7 @@ use crate::domain::{
 };
 use crate::shared::actions::*;
 use crate::shared::theme;
+use crate::ui::text_edit::TextEdit;
 use crate::ui::widgets::{ChipButton, NavItem, ToolButton};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub struct WorkspaceView {
     process_query: String,
     port_query: String,
     port_proto: Option<Protocol>,
-    file_query: String,
+    file_query: TextEdit,
     dns_query: String,
     active_field: ActiveField,
     sort_key: ProcessSortKey,
@@ -51,7 +52,7 @@ impl WorkspaceView {
             process_query: String::new(),
             port_query: String::new(),
             port_proto: None,
-            file_query: String::new(),
+            file_query: TextEdit::default(),
             dns_query: String::new(),
             active_field: ActiveField::Process,
             sort_key: ProcessSortKey::Cpu,
@@ -706,13 +707,14 @@ impl WorkspaceView {
             .flex_row()
             .items_center()
             .gap_1()
-            .child(search_box(
+            .child(file_path_box(
                 "file-q",
                 &self.file_query,
                 "文件/目录路径（建议管理员）",
                 self.active_field == ActiveField::File,
                 cx.listener(|this, _, _, cx| {
                     this.active_field = ActiveField::File;
+                    this.file_query.select_all();
                     cx.notify();
                 }),
             ))
@@ -721,7 +723,7 @@ impl WorkspaceView {
                     "file-search",
                     "查询占用",
                     cx.listener(|this, _, _, cx| {
-                        let q = this.file_query.clone();
+                        let q = this.file_query.text.clone();
                         this.store.update(cx, |s, cx| s.search_path_holders(q, cx));
                     }),
                 )
@@ -1493,37 +1495,57 @@ impl WorkspaceView {
             );
         }
 
-        div().children(children)
+        if children.is_empty() {
+            return div().into_any_element();
+        }
+        // Cover the whole workspace (parent must be `.relative()`), not a flex-row sibling.
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.0,
+                a: 0.35,
+            })
+            .children(children)
+            .into_any_element()
     }
 
     fn type_into_active(&mut self, ch: &str) {
-        let field = match self.active_field {
-            ActiveField::Process => &mut self.process_query,
-            ActiveField::Port => &mut self.port_query,
-            ActiveField::File => &mut self.file_query,
-            ActiveField::Dns => &mut self.dns_query,
-        };
-        field.push_str(ch);
+        match self.active_field {
+            ActiveField::Process => self.process_query.push_str(ch),
+            ActiveField::Port => self.port_query.push_str(ch),
+            ActiveField::File => self.file_query.insert(ch),
+            ActiveField::Dns => self.dns_query.push_str(ch),
+        }
     }
 
     fn backspace_active(&mut self) {
-        let field = match self.active_field {
-            ActiveField::Process => &mut self.process_query,
-            ActiveField::Port => &mut self.port_query,
-            ActiveField::File => &mut self.file_query,
-            ActiveField::Dns => &mut self.dns_query,
-        };
-        field.pop();
+        match self.active_field {
+            ActiveField::Process => {
+                self.process_query.pop();
+            }
+            ActiveField::Port => {
+                self.port_query.pop();
+            }
+            ActiveField::File => self.file_query.backspace(),
+            ActiveField::Dns => {
+                self.dns_query.pop();
+            }
+        }
     }
 
     fn clear_active(&mut self) {
-        let field = match self.active_field {
-            ActiveField::Process => &mut self.process_query,
-            ActiveField::Port => &mut self.port_query,
-            ActiveField::File => &mut self.file_query,
-            ActiveField::Dns => &mut self.dns_query,
-        };
-        field.clear();
+        match self.active_field {
+            ActiveField::Process => self.process_query.clear(),
+            ActiveField::Port => self.port_query.clear(),
+            ActiveField::File => self.file_query.clear(),
+            ActiveField::Dns => self.dns_query.clear(),
+        }
     }
 }
 
@@ -1594,11 +1616,37 @@ impl Render for WorkspaceView {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "enter" {
-                    if this.pane == MainPane::Files {
-                        let q = this.file_query.clone();
+                if this.active_field == ActiveField::File {
+                    if event.keystroke.key == "enter" {
+                        let q = this.file_query.text.clone();
                         this.store.update(cx, |s, cx| s.search_path_holders(q, cx));
+                        cx.notify();
+                        return;
                     }
+                    if event.keystroke.key == "escape" {
+                        if this.detail_open {
+                            this.detail_open = false;
+                        } else {
+                            this.file_query.clear();
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    if this.file_query.handle_key(event, cx) {
+                        cx.notify();
+                        return;
+                    }
+                    let mods = &event.keystroke.modifiers;
+                    if !(mods.control || mods.platform || mods.alt) {
+                        if let Some(ch) = TextEdit::typed_from_keystroke(&event.keystroke) {
+                            this.file_query.insert(&ch);
+                            cx.notify();
+                        }
+                    }
+                    return;
+                }
+
+                if event.keystroke.key == "enter" {
                     return;
                 }
                 if event.keystroke.key == "backspace" {
@@ -1624,6 +1672,7 @@ impl Render for WorkspaceView {
                 }
             }))
             .size_full()
+            .relative()
             .flex()
             .flex_row()
             .bg(theme::BG)
@@ -1745,6 +1794,36 @@ fn search_box(
         .on_click(on_click)
 }
 
+fn file_path_box(
+    id: impl Into<ElementId>,
+    edit: &TextEdit,
+    placeholder: &str,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(420.))
+        .h(px(28.))
+        .px_2()
+        .rounded(px(theme::RADIUS_SM))
+        .bg(theme::PANEL_BG)
+        .border_1()
+        .border_color(if active {
+            theme::ACCENT
+        } else {
+            theme::BORDER
+        })
+        .flex()
+        .items_center()
+        .min_w_0()
+        .overflow_hidden()
+        .text_sm()
+        .cursor_text()
+        .child(edit.render_content(active, placeholder))
+        .on_click(on_click)
+}
+
 fn process_table_header() -> impl IntoElement {
     div()
         .flex()
@@ -1849,45 +1928,31 @@ fn modal_shell(
     let cancel2 = cancel.clone();
     let ok2 = ok.clone();
     div()
-        .absolute()
-        .inset_0()
+        .w(px(400.))
+        .p_4()
+        .rounded(px(theme::RADIUS_MD))
+        .bg(theme::PANEL_BG)
+        .border_1()
+        .border_color(theme::BORDER)
+        .shadow_md()
         .flex()
-        .items_center()
-        .justify_center()
-        .bg(Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.0,
-            a: 0.35,
-        })
+        .flex_col()
+        .gap_3()
+        .child(div().text_color(theme::TEXT).child(title))
         .child(
             div()
-                .w(px(400.))
-                .p_4()
-                .rounded(px(theme::RADIUS_MD))
-                .bg(theme::PANEL_BG)
-                .border_1()
-                .border_color(theme::BORDER)
-                .shadow_md()
                 .flex()
-                .flex_col()
-                .gap_3()
-                .child(div().text_color(theme::TEXT).child(title))
+                .flex_row()
+                .gap_2()
+                .justify_end()
+                .child(ToolButton::new("modal-cancel", "取消", move |_, _, cx| {
+                    store_cancel.update(cx, |s, cx| cancel2(s, cx));
+                }))
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .justify_end()
-                        .child(ToolButton::new("modal-cancel", "取消", move |_, _, cx| {
-                            store_cancel.update(cx, |s, cx| cancel2(s, cx));
-                        }))
-                        .child(
-                            ToolButton::new("modal-ok", "确认", move |_, _, cx| {
-                                store_ok.update(cx, |s, cx| ok2(s, cx));
-                            })
-                            .danger(),
-                        ),
+                    ToolButton::new("modal-ok", "确认", move |_, _, cx| {
+                        store_ok.update(cx, |s, cx| ok2(s, cx));
+                    })
+                    .danger(),
                 ),
         )
 }

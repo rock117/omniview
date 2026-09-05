@@ -1,3 +1,4 @@
+mod text_edit;
 mod widgets;
 mod workspace_view;
 

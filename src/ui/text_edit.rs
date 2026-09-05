@@ -147,6 +147,66 @@ impl TextEdit {
         }
     }
 
+    /// Replace text when it changes; keep caret if unchanged.
+    pub fn set_text_if_changed(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if self.text == text {
+            return;
+        }
+        self.text = text;
+        let len = self.char_len();
+        self.cursor = len;
+        self.anchor = len;
+    }
+
+    /// Select / copy / navigate only (no mutate). Returns true if consumed.
+    pub fn handle_key_readonly(&mut self, event: &KeyDownEvent, cx: &mut App) -> bool {
+        let key = event.keystroke.key.as_str();
+        let mods = &event.keystroke.modifiers;
+        let chord = mods.control || mods.platform;
+        let shift = mods.shift;
+
+        if chord && key.eq_ignore_ascii_case("a") {
+            self.select_all();
+            return true;
+        }
+        if chord && (key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("x")) {
+            let text = if self.has_selection() {
+                self.selected_text()
+            } else {
+                self.text.clone()
+            };
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            return true;
+        }
+        if key == "left" {
+            self.move_left(shift);
+            return true;
+        }
+        if key == "right" {
+            self.move_right(shift);
+            return true;
+        }
+        if key == "home" {
+            self.move_home(shift);
+            return true;
+        }
+        if key == "end" {
+            self.move_end(shift);
+            return true;
+        }
+        // Block edit keys on read-only fields.
+        if chord && key.eq_ignore_ascii_case("v") {
+            return true;
+        }
+        if key == "backspace" || key == "delete" {
+            return true;
+        }
+        false
+    }
+
     /// Handle clipboard / navigation keys. Returns true if consumed.
     pub fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut App) -> bool {
         let key = event.keystroke.key.as_str();

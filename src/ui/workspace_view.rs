@@ -23,6 +23,14 @@ enum ActiveField {
     Dns,
 }
 
+/// Focused copyable value in the process detail panel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailCopyTarget {
+    ParentPid,
+    Path,
+    OpenFile(usize),
+}
+
 pub struct WorkspaceView {
     store: Entity<SnapshotStore>,
     pane: MainPane,
@@ -38,6 +46,8 @@ pub struct WorkspaceView {
     expanded: HashSet<Pid>,
     selected_pid: Option<Pid>,
     detail_open: bool,
+    detail_copy: Option<DetailCopyTarget>,
+    detail_edit: TextEdit,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -61,6 +71,8 @@ impl WorkspaceView {
             expanded: HashSet::new(),
             selected_pid: None,
             detail_open: false,
+            detail_copy: None,
+            detail_edit: TextEdit::default(),
             focus,
             _subs: Vec::new(),
         };
@@ -76,6 +88,9 @@ impl WorkspaceView {
                         .any(|p| p.pid == pid);
                     if !alive {
                         this.selected_pid = None;
+                        this.detail_copy = None;
+                    } else {
+                        this.sync_detail_edit(cx);
                     }
                 }
                 cx.notify();
@@ -91,6 +106,62 @@ impl WorkspaceView {
 
     fn snapshot(&self, cx: &App) -> Arc<SystemSnapshot> {
         self.store.read(cx).snapshot.clone()
+    }
+
+    fn focus_detail_copy(&mut self, target: DetailCopyTarget, text: String) {
+        self.detail_copy = Some(target);
+        self.detail_edit = TextEdit::new(text);
+        self.detail_edit.select_all();
+    }
+
+    fn detail_copy_text(&self, target: DetailCopyTarget, cx: &App) -> Option<String> {
+        let pid = self.selected_pid?;
+        match target {
+            DetailCopyTarget::ParentPid => {
+                let p = self
+                    .store
+                    .read(cx)
+                    .snapshot
+                    .processes
+                    .iter()
+                    .find(|p| p.pid == pid)?;
+                Some(
+                    p.parent_pid
+                        .map(|x| x.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                )
+            }
+            DetailCopyTarget::Path => {
+                let p = self
+                    .store
+                    .read(cx)
+                    .snapshot
+                    .processes
+                    .iter()
+                    .find(|p| p.pid == pid)?;
+                Some(p.exe_path.clone().unwrap_or_else(|| "-".into()))
+            }
+            DetailCopyTarget::OpenFile(idx) => {
+                let pf = &self.store.read(cx).process_files;
+                if pf.pid != Some(pid) {
+                    return None;
+                }
+                pf.files.get(idx).map(|f| f.path.clone())
+            }
+        }
+    }
+
+    fn sync_detail_edit(&mut self, cx: &App) {
+        let Some(target) = self.detail_copy else {
+            return;
+        };
+        match self.detail_copy_text(target, cx) {
+            Some(text) => self.detail_edit.set_text_if_changed(text),
+            None => {
+                self.detail_copy = None;
+                self.detail_edit.clear();
+            }
+        }
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -509,6 +580,9 @@ impl WorkspaceView {
                     .child(path),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
+                if this.selected_pid != Some(pid) {
+                    this.detail_copy = None;
+                }
                 this.selected_pid = Some(pid);
                 this.detail_open = true;
                 this.store.update(cx, |s, cx| s.load_process_files(pid, cx));
@@ -517,6 +591,9 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, _, _, cx| {
+                    if this.selected_pid != Some(pid) {
+                        this.detail_copy = None;
+                    }
                     this.selected_pid = Some(pid);
                     this.detail_open = true;
                     this.store.update(cx, |s, cx| {
@@ -685,6 +762,7 @@ impl WorkspaceView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.selected_pid = Some(pid);
                                 this.detail_open = true;
+                                this.detail_copy = None;
                                 this.store.update(cx, |s, cx| s.load_process_files(pid, cx));
                                 cx.notify();
                             }))
@@ -808,6 +886,7 @@ impl WorkspaceView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.selected_pid = Some(pid);
                                 this.detail_open = true;
+                                this.detail_copy = None;
                                 this.store.update(cx, |s, cx| s.load_process_files(pid, cx));
                                 cx.notify();
                             }))
@@ -1319,6 +1398,7 @@ impl WorkspaceView {
                             .child("✕")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.detail_open = false;
+                                this.detail_copy = None;
                                 cx.notify();
                             })),
                     ),
@@ -1332,7 +1412,7 @@ impl WorkspaceView {
                     .child(
                         div()
                             .id("detail-info")
-                            .w(px(280.))
+                            .w(px(320.))
                             .h_full()
                             .px_3()
                             .py_2()
@@ -1340,6 +1420,15 @@ impl WorkspaceView {
                             .border_r_1()
                             .border_color(theme::BORDER_SUBTLE)
                             .when_some(proc_.cloned(), |el, p| {
+                                let parent = p
+                                    .parent_pid
+                                    .map(|x| x.to_string())
+                                    .unwrap_or_else(|| "-".into());
+                                let path = p.exe_path.clone().unwrap_or_else(|| "-".into());
+                                let parent_focused =
+                                    self.detail_copy == Some(DetailCopyTarget::ParentPid);
+                                let path_focused =
+                                    self.detail_copy == Some(DetailCopyTarget::Path);
                                 el.child(
                                     div()
                                         .gap_1()
@@ -1347,17 +1436,59 @@ impl WorkspaceView {
                                         .flex_col()
                                         .text_sm()
                                         .child(format!("CPU  {:.1}%", p.cpu_percent))
-                                        .child(format!("内存  {}", format_bytes(p.memory_bytes)))
                                         .child(format!(
-                                            "父 PID  {}",
-                                            p.parent_pid
-                                                .map(|x| x.to_string())
-                                                .unwrap_or_else(|| "-".into())
+                                            "内存  {}",
+                                            format_bytes(p.memory_bytes)
                                         ))
-                                        .child(format!(
-                                            "路径  {}",
-                                            p.exe_path.clone().unwrap_or_else(|| "-".into())
-                                        )),
+                                        .child(copyable_detail_row(
+                                            "detail-parent",
+                                            "父 PID",
+                                            &parent,
+                                            parent_focused,
+                                            if parent_focused {
+                                                Some(&self.detail_edit)
+                                            } else {
+                                                None
+                                            },
+                                            cx.listener({
+                                                let parent = parent.clone();
+                                                move |this, _, _, cx| {
+                                                    this.focus_detail_copy(
+                                                        DetailCopyTarget::ParentPid,
+                                                        parent.clone(),
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            }),
+                                        ))
+                                        .child(copyable_detail_row(
+                                            "detail-path",
+                                            "路径",
+                                            &path,
+                                            path_focused,
+                                            if path_focused {
+                                                Some(&self.detail_edit)
+                                            } else {
+                                                None
+                                            },
+                                            cx.listener({
+                                                let path = path.clone();
+                                                move |this, _, _, cx| {
+                                                    this.focus_detail_copy(
+                                                        DetailCopyTarget::Path,
+                                                        path.clone(),
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            }),
+                                        ))
+                                        .child(
+                                            div()
+                                                .mt_1()
+                                                .text_xs()
+                                                .text_color(theme::TEXT_MUTED)
+                                                .child("点击选中，Ctrl+C 复制"),
+                                        ),
                                 )
                             }),
                     )
@@ -1414,7 +1545,7 @@ impl WorkspaceView {
                                     .child(if pf.busy {
                                         "文件句柄加载中…".to_string()
                                     } else if pf.pid == Some(pid) {
-                                        format!("打开文件（{}）", pf.files.len())
+                                        format!("打开文件（{}）· 点击选中 Ctrl+C 复制", pf.files.len())
                                     } else {
                                         "打开文件".into()
                                     }),
@@ -1427,18 +1558,59 @@ impl WorkspaceView {
                                     .id("detail-files")
                                     .flex_1()
                                     .overflow_y_scroll()
-                                    .children(
-                                        pf.files
-                                            .into_iter()
-                                            .filter(|_| pf.pid == Some(pid))
-                                            .map(|f| {
-                                                div()
-                                                    .py_1()
-                                                    .text_xs()
-                                                    .child(f.path)
-                                                    .into_any_element()
-                                            }),
-                                    ),
+                                    .children({
+                                        let files = if pf.pid == Some(pid) {
+                                            pf.files
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        files.into_iter().enumerate().map(|(idx, f)| {
+                                            let focused = self.detail_copy
+                                                == Some(DetailCopyTarget::OpenFile(idx));
+                                            let path = f.path;
+                                            div()
+                                                .id(ElementId::Name(
+                                                    format!("detail-file-{idx}").into(),
+                                                ))
+                                                .py_1()
+                                                .px_1()
+                                                .rounded(px(theme::RADIUS_SM))
+                                                .text_xs()
+                                                .cursor_text()
+                                                .bg(if focused {
+                                                    theme::SELECTED
+                                                } else {
+                                                    theme::PANEL_BG
+                                                })
+                                                .hover(|s| {
+                                                    if focused {
+                                                        s
+                                                    } else {
+                                                        s.bg(theme::HOVER)
+                                                    }
+                                                })
+                                                .child(if focused {
+                                                    self.detail_edit
+                                                        .render_content(true, "")
+                                                } else {
+                                                    div()
+                                                        .text_color(theme::TEXT)
+                                                        .child(path.clone())
+                                                        .into_any_element()
+                                                })
+                                                .on_click(cx.listener({
+                                                    let path = path.clone();
+                                                    move |this, _, _, cx| {
+                                                        this.focus_detail_copy(
+                                                            DetailCopyTarget::OpenFile(idx),
+                                                            path.clone(),
+                                                        );
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .into_any_element()
+                                        })
+                                    }),
                             ),
                     ),
             )
@@ -1616,6 +1788,24 @@ impl Render for WorkspaceView {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if this.detail_copy.is_some() && this.detail_open {
+                    if event.keystroke.key == "escape" {
+                        this.detail_copy = None;
+                        cx.notify();
+                        return;
+                    }
+                    if this.detail_edit.handle_key_readonly(event, cx) {
+                        cx.notify();
+                        return;
+                    }
+                    // Don't fall through to search typing while a detail value is focused.
+                    if event.keystroke.key_char.is_some()
+                        || event.keystroke.key.as_str() == "space"
+                    {
+                        return;
+                    }
+                }
+
                 if this.active_field == ActiveField::File {
                     if event.keystroke.key == "enter" {
                         let q = this.file_query.text.clone();
@@ -1655,6 +1845,11 @@ impl Render for WorkspaceView {
                     return;
                 }
                 if event.keystroke.key == "escape" {
+                    if this.detail_copy.is_some() {
+                        this.detail_copy = None;
+                        cx.notify();
+                        return;
+                    }
                     if this.detail_open {
                         this.detail_open = false;
                         cx.notify();
@@ -1791,6 +1986,59 @@ fn search_box(
         } else {
             value.to_string()
         })
+        .on_click(on_click)
+}
+
+fn copyable_detail_row(
+    id: impl Into<ElementId>,
+    label: &str,
+    value: &str,
+    focused: bool,
+    edit: Option<&TextEdit>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap_0()
+        .py_1()
+        .px_1()
+        .rounded(px(theme::RADIUS_SM))
+        .cursor_text()
+        .bg(if focused {
+            theme::SELECTED
+        } else {
+            theme::PANEL_BG
+        })
+        .hover(|s| {
+            if focused {
+                s
+            } else {
+                s.bg(theme::HOVER)
+            }
+        })
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::TEXT_MUTED)
+                .child(label.to_string()),
+        )
+        .child(
+            div().min_w_0().overflow_hidden().text_sm().child(
+                if focused {
+                    edit.map(|e| e.render_content(true, ""))
+                        .unwrap_or_else(|| {
+                            div().text_color(theme::TEXT).child(value.to_string()).into_any_element()
+                        })
+                } else {
+                    div()
+                        .text_color(theme::TEXT)
+                        .child(value.to_string())
+                        .into_any_element()
+                },
+            ),
+        )
         .on_click(on_click)
 }
 

@@ -1,9 +1,14 @@
-//! Single-line text edit with selection (copy / cut / paste / select-all).
+//! Single-line text edit: selection, clipboard, caret blink, mouse hit-test, IME.
+
+use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::*;
 
 use crate::shared::theme;
+
+/// Approximate average glyph width for `text-sm` hit-testing (ASCII-biased).
+pub const AVG_CHAR_W: f32 = 8.0;
 
 #[derive(Clone, Debug, Default)]
 pub struct TextEdit {
@@ -12,6 +17,9 @@ pub struct TextEdit {
     pub cursor: usize,
     /// Selection anchor; range is `min(anchor, cursor)..max(anchor, cursor)`.
     pub anchor: usize,
+    pub caret_visible: bool,
+    /// IME preedit range in Unicode scalar indices.
+    pub marked: Option<(usize, usize)>,
 }
 
 impl TextEdit {
@@ -22,6 +30,8 @@ impl TextEdit {
             text,
             cursor: len,
             anchor: len,
+            caret_visible: true,
+            marked: None,
         }
     }
 
@@ -40,12 +50,16 @@ impl TextEdit {
     pub fn select_all(&mut self) {
         self.anchor = 0;
         self.cursor = self.char_len();
+        self.caret_visible = true;
+        self.marked = None;
     }
 
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
         self.anchor = 0;
+        self.caret_visible = true;
+        self.marked = None;
     }
 
     pub fn selected_text(&self) -> String {
@@ -63,6 +77,8 @@ impl TextEdit {
         self.text = before + &after;
         self.cursor = lo;
         self.anchor = lo;
+        self.caret_visible = true;
+        self.marked = None;
         true
     }
 
@@ -74,6 +90,8 @@ impl TextEdit {
         self.text = before + typed + &after;
         self.cursor += insert_len;
         self.anchor = self.cursor;
+        self.caret_visible = true;
+        self.marked = None;
     }
 
     pub fn backspace(&mut self) {
@@ -88,6 +106,8 @@ impl TextEdit {
         self.text = before + &after;
         self.cursor -= 1;
         self.anchor = self.cursor;
+        self.caret_visible = true;
+        self.marked = None;
     }
 
     pub fn delete_forward(&mut self) {
@@ -101,6 +121,8 @@ impl TextEdit {
         let after: String = self.text.chars().skip(self.cursor + 1).collect();
         self.text = before + &after;
         self.anchor = self.cursor;
+        self.caret_visible = true;
+        self.marked = None;
     }
 
     pub fn move_left(&mut self, extend: bool) {
@@ -108,6 +130,7 @@ impl TextEdit {
             let (lo, _) = self.sel_range();
             self.cursor = lo;
             self.anchor = lo;
+            self.caret_visible = true;
             return;
         }
         if self.cursor > 0 {
@@ -116,6 +139,7 @@ impl TextEdit {
         if !extend {
             self.anchor = self.cursor;
         }
+        self.caret_visible = true;
     }
 
     pub fn move_right(&mut self, extend: bool) {
@@ -123,6 +147,7 @@ impl TextEdit {
             let (_, hi) = self.sel_range();
             self.cursor = hi;
             self.anchor = hi;
+            self.caret_visible = true;
             return;
         }
         if self.cursor < self.char_len() {
@@ -131,6 +156,7 @@ impl TextEdit {
         if !extend {
             self.anchor = self.cursor;
         }
+        self.caret_visible = true;
     }
 
     pub fn move_home(&mut self, extend: bool) {
@@ -138,6 +164,7 @@ impl TextEdit {
         if !extend {
             self.anchor = 0;
         }
+        self.caret_visible = true;
     }
 
     pub fn move_end(&mut self, extend: bool) {
@@ -145,9 +172,27 @@ impl TextEdit {
         if !extend {
             self.anchor = self.cursor;
         }
+        self.caret_visible = true;
     }
 
-    /// Replace text when it changes; keep caret if unchanged.
+    pub fn set_caret(&mut self, index: usize, extend: bool) {
+        let i = index.min(self.char_len());
+        self.cursor = i;
+        if !extend {
+            self.anchor = i;
+        }
+        self.caret_visible = true;
+        self.marked = None;
+    }
+
+    pub fn char_index_at_x(&self, local_x: f32) -> usize {
+        if local_x <= 0.0 {
+            return 0;
+        }
+        let idx = (local_x / AVG_CHAR_W).round() as usize;
+        idx.min(self.char_len())
+    }
+
     pub fn set_text_if_changed(&mut self, text: impl Into<String>) {
         let text = text.into();
         if self.text == text {
@@ -157,9 +202,100 @@ impl TextEdit {
         let len = self.char_len();
         self.cursor = len;
         self.anchor = len;
+        self.marked = None;
     }
 
-    /// Select / copy / navigate only (no mutate). Returns true if consumed.
+    pub fn char_to_utf16(text: &str, char_idx: usize) -> usize {
+        text.chars().take(char_idx).map(|c| c.len_utf16()).sum()
+    }
+
+    pub fn utf16_to_char(text: &str, utf16_idx: usize) -> usize {
+        let mut u16s = 0usize;
+        for (i, ch) in text.chars().enumerate() {
+            if u16s >= utf16_idx {
+                return i;
+            }
+            u16s += ch.len_utf16();
+        }
+        text.chars().count()
+    }
+
+    #[allow(dead_code)]
+    pub fn utf16_len(text: &str) -> usize {
+        text.chars().map(|c| c.len_utf16()).sum()
+    }
+
+    pub fn selection_utf16(&self) -> Range<usize> {
+        let (lo, hi) = self.sel_range();
+        Self::char_to_utf16(&self.text, lo)..Self::char_to_utf16(&self.text, hi)
+    }
+
+    /// Replace a UTF-16 range (or selection / marked) with `new_text` (IME commit / WM_CHAR).
+    pub fn replace_utf16_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str) {
+        let range = range_utf16
+            .map(|r| {
+                Self::utf16_to_char(&self.text, r.start)..Self::utf16_to_char(&self.text, r.end)
+            })
+            .or_else(|| self.marked.map(|(a, b)| a..b))
+            .unwrap_or_else(|| {
+                let (lo, hi) = self.sel_range();
+                lo..hi
+            });
+        let before: String = self.text.chars().take(range.start).collect();
+        let after: String = self.text.chars().skip(range.end).collect();
+        let cleaned = new_text.replace('\r', "").replace('\n', "");
+        let insert_len = cleaned.chars().count();
+        self.text = before + &cleaned + &after;
+        self.cursor = range.start + insert_len;
+        self.anchor = self.cursor;
+        self.marked = None;
+        self.caret_visible = true;
+    }
+
+    /// IME preedit: replace range and mark the inserted text.
+    pub fn replace_and_mark_utf16(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_utf16: Option<Range<usize>>,
+    ) {
+        let range = range_utf16
+            .map(|r| {
+                Self::utf16_to_char(&self.text, r.start)..Self::utf16_to_char(&self.text, r.end)
+            })
+            .or_else(|| self.marked.map(|(a, b)| a..b))
+            .unwrap_or_else(|| {
+                let (lo, hi) = self.sel_range();
+                lo..hi
+            });
+        let before: String = self.text.chars().take(range.start).collect();
+        let after: String = self.text.chars().skip(range.end).collect();
+        let cleaned = new_text.replace('\r', "").replace('\n', "");
+        let insert_len = cleaned.chars().count();
+        self.text = before + &cleaned + &after;
+        if cleaned.is_empty() {
+            self.marked = None;
+        } else {
+            self.marked = Some((range.start, range.start + insert_len));
+        }
+        if let Some(sel) = new_selected_utf16 {
+            // Selection is relative to the new marked text in UTF-16 (GPUI convention varies);
+            // map within inserted segment when possible.
+            let rel_start = Self::utf16_to_char(&cleaned, sel.start);
+            let rel_end = Self::utf16_to_char(&cleaned, sel.end);
+            self.cursor = range.start + rel_end.min(insert_len);
+            self.anchor = range.start + rel_start.min(insert_len);
+        } else {
+            self.cursor = range.start + insert_len;
+            self.anchor = self.cursor;
+        }
+        self.caret_visible = true;
+    }
+
+    pub fn unmark(&mut self) {
+        self.marked = None;
+    }
+
     pub fn handle_key_readonly(&mut self, event: &KeyDownEvent, cx: &mut App) -> bool {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
@@ -197,7 +333,6 @@ impl TextEdit {
             self.move_end(shift);
             return true;
         }
-        // Block edit keys on read-only fields.
         if chord && key.eq_ignore_ascii_case("v") {
             return true;
         }
@@ -207,7 +342,6 @@ impl TextEdit {
         false
     }
 
-    /// Handle clipboard / navigation keys. Returns true if consumed.
     pub fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut App) -> bool {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
@@ -283,19 +417,7 @@ impl TextEdit {
         false
     }
 
-    /// Printable character from keystroke, if any.
-    pub fn typed_from_keystroke(keystroke: &Keystroke) -> Option<String> {
-        if keystroke.key.as_str() == "space" {
-            return Some(" ".to_string());
-        }
-        keystroke
-            .key_char
-            .as_ref()
-            .map(|s| s.replace('\r', "").replace('\n', ""))
-            .filter(|s| !s.is_empty())
-    }
-
-    /// Render text with selection highlight and caret (when focused).
+    /// Render text with selection, IME mark, and blinking caret.
     pub fn render_content(&self, focused: bool, placeholder: &str) -> AnyElement {
         if self.text.is_empty() && !focused {
             return div()
@@ -307,7 +429,7 @@ impl TextEdit {
             return div()
                 .flex()
                 .items_center()
-                .child(caret_el())
+                .child(caret_el(self.caret_visible))
                 .child(
                     div()
                         .text_color(theme::TEXT_MUTED)
@@ -328,6 +450,12 @@ impl TextEdit {
                 .rounded(px(2.0))
                 .child(s)
         };
+        let marked_el = |s: String| {
+            div()
+                .border_b_1()
+                .border_color(theme::ACCENT)
+                .child(s)
+        };
 
         let mut row = div()
             .flex()
@@ -337,12 +465,29 @@ impl TextEdit {
             .whitespace_nowrap()
             .text_color(theme::TEXT);
 
+        // Prefer showing IME marked range when present.
+        if focused {
+            if let Some((mlo, mhi)) = self.marked {
+                let mlo = mlo.min(self.char_len());
+                let mhi = mhi.min(self.char_len()).max(mlo);
+                let before: String = self.text.chars().take(mlo).collect();
+                let marked: String = self.text.chars().skip(mlo).take(mhi - mlo).collect();
+                let after: String = self.text.chars().skip(mhi).collect();
+                return row
+                    .child(div().child(before))
+                    .child(marked_el(marked))
+                    .child(caret_el(self.caret_visible))
+                    .child(div().overflow_hidden().child(after))
+                    .into_any_element();
+            }
+        }
+
         if !focused || lo == hi {
             let before: String = self.text.chars().take(cursor).collect();
             let after: String = self.text.chars().skip(cursor).collect();
             row = row.child(div().child(before));
             if focused {
-                row = row.child(caret_el());
+                row = row.child(caret_el(self.caret_visible));
             }
             row = row.child(div().overflow_hidden().child(after));
         } else if cursor <= lo {
@@ -350,7 +495,7 @@ impl TextEdit {
             let mid: String = before_sel.chars().skip(cursor).collect();
             row = row
                 .child(div().child(before_c))
-                .child(caret_el())
+                .child(caret_el(self.caret_visible))
                 .child(div().child(mid))
                 .child(sel_el(selected))
                 .child(div().overflow_hidden().child(after_sel));
@@ -361,7 +506,7 @@ impl TextEdit {
                 .child(div().child(before_sel))
                 .child(sel_el(selected))
                 .child(div().child(after_before))
-                .child(caret_el())
+                .child(caret_el(self.caret_visible))
                 .child(div().overflow_hidden().child(after_after));
         } else {
             let sel_before: String = selected.chars().take(cursor - lo).collect();
@@ -369,7 +514,7 @@ impl TextEdit {
             row = row
                 .child(div().child(before_sel))
                 .child(sel_el(sel_before))
-                .child(caret_el())
+                .child(caret_el(self.caret_visible))
                 .child(sel_el(sel_after))
                 .child(div().overflow_hidden().child(after_sel));
         }
@@ -377,10 +522,19 @@ impl TextEdit {
     }
 }
 
-fn caret_el() -> impl IntoElement {
+fn caret_el(visible: bool) -> impl IntoElement {
     div()
         .w(px(1.0))
         .h(px(14.0))
         .flex_shrink_0()
-        .bg(theme::TEXT)
+        .bg(if visible {
+            theme::TEXT
+        } else {
+            Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.0,
+                a: 0.0,
+            }
+        })
 }

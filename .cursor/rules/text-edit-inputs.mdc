@@ -1,0 +1,24 @@
+---
+description: All text inputs must use TextEdit
+globs: src/ui/**/*.rs
+alwaysApply: true
+---
+
+# Text inputs → TextEdit
+
+- Every editable text field (search boxes, path inputs, forms) MUST use `crate::ui::text_edit::TextEdit`.
+- Do **not** store input/query UI state as a bare `String`.
+- Prefer shared chrome `text_input_box` that renders via `TextEdit::render_content`.
+- Clipboard / arrows: `TextEdit::handle_key`. Printable + Chinese IME: `EntityInputHandler` on `WorkspaceView` (do not also insert from `key_char`).
+- Support caret blink (`caret_visible`), mouse drag select (`set_caret` / `char_index_at_x`), and IME mark (`marked` / `replace_utf16_range`).
+- Read-only copyable labels may use `TextEdit` + `handle_key_readonly`.
+- Filtering/search reads `.text`.
+
+```rust
+// ❌ BAD
+process_query: String,
+
+// ✅ GOOD
+process_query: TextEdit,
+text_input_box(..., &self.process_query, ..., ActiveField::Process, cx)
+```

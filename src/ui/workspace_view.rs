@@ -34,11 +34,11 @@ enum DetailCopyTarget {
 pub struct WorkspaceView {
     store: Entity<SnapshotStore>,
     pane: MainPane,
-    process_query: String,
-    port_query: String,
+    process_query: TextEdit,
+    port_query: TextEdit,
     port_proto: Option<Protocol>,
     file_query: TextEdit,
-    dns_query: String,
+    dns_query: TextEdit,
     active_field: ActiveField,
     sort_key: ProcessSortKey,
     sort_dir: SortDir,
@@ -48,7 +48,10 @@ pub struct WorkspaceView {
     detail_open: bool,
     detail_copy: Option<DetailCopyTarget>,
     detail_edit: TextEdit,
+    input_bounds: Option<Bounds<Pixels>>,
+    input_selecting: bool,
     focus: FocusHandle,
+    _caret_blink: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -59,11 +62,11 @@ impl WorkspaceView {
         let mut view = Self {
             store: store.clone(),
             pane: MainPane::Processes,
-            process_query: String::new(),
-            port_query: String::new(),
+            process_query: TextEdit::default(),
+            port_query: TextEdit::default(),
             port_proto: None,
             file_query: TextEdit::default(),
-            dns_query: String::new(),
+            dns_query: TextEdit::default(),
             active_field: ActiveField::Process,
             sort_key: ProcessSortKey::Cpu,
             sort_dir: SortDir::Desc,
@@ -73,9 +76,13 @@ impl WorkspaceView {
             detail_open: false,
             detail_copy: None,
             detail_edit: TextEdit::default(),
+            input_bounds: None,
+            input_selecting: false,
             focus,
+            _caret_blink: None,
             _subs: Vec::new(),
         };
+        view.start_caret_blink(cx);
         view._subs.push(cx.subscribe(&store, |this, _store, event, cx| {
             if matches!(event, SnapshotEvent::Updated) {
                 if let Some(pid) = this.selected_pid {
@@ -112,6 +119,55 @@ impl WorkspaceView {
         self.detail_copy = Some(target);
         self.detail_edit = TextEdit::new(text);
         self.detail_edit.select_all();
+        self.input_selecting = false;
+    }
+
+    fn start_caret_blink(&mut self, cx: &mut Context<Self>) {
+        self._caret_blink = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(530))
+                    .await;
+                let keep = this
+                    .update(cx, |this, cx| {
+                        if this.detail_copy.is_some() {
+                            this.detail_edit.caret_visible = !this.detail_edit.caret_visible;
+                        } else {
+                            let edit = match this.active_field {
+                                ActiveField::Process => &mut this.process_query,
+                                ActiveField::Port => &mut this.port_query,
+                                ActiveField::File => &mut this.file_query,
+                                ActiveField::Dns => &mut this.dns_query,
+                            };
+                            edit.caret_visible = !edit.caret_visible;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn index_at_pointer(&self, position: Point<Pixels>) -> usize {
+        let Some(bounds) = self.input_bounds else {
+            return self.active_edit().char_len();
+        };
+        let pad: f32 = 8.0; // matches px_2 on text_input_box
+        let local_x: f32 = (position.x - bounds.origin.x).into();
+        self.active_edit().char_index_at_x(local_x - pad)
+    }
+
+    fn active_edit(&self) -> &TextEdit {
+        match self.active_field {
+            ActiveField::Process => &self.process_query,
+            ActiveField::Port => &self.port_query,
+            ActiveField::File => &self.file_query,
+            ActiveField::Dns => &self.dns_query,
+        }
     }
 
     fn detail_copy_text(&self, target: DetailCopyTarget, cx: &App) -> Option<String> {
@@ -305,7 +361,7 @@ impl WorkspaceView {
         let snap = self.snapshot(cx);
         let mut processes = snap.processes.clone();
         sort_processes(&mut processes, self.sort_key, self.sort_dir);
-        let filtered: Vec<ProcessInfo> = filter_processes(&processes, &self.process_query)
+        let filtered: Vec<ProcessInfo> = filter_processes(&processes, &self.process_query.text)
             .into_iter()
             .cloned()
             .collect();
@@ -320,15 +376,14 @@ impl WorkspaceView {
             .flex_row()
             .items_center()
             .gap_1()
-            .child(search_box(
+            .child(text_input_box(
                 "proc-q",
                 &self.process_query,
                 "搜索名称、PID 或路径",
                 self.active_field == ActiveField::Process,
-                cx.listener(|this, _, _, cx| {
-                    this.active_field = ActiveField::Process;
-                    cx.notify();
-                }),
+                px(280.),
+                ActiveField::Process,
+                cx,
             ))
             .child(ChipButton::new(
                 "mode-list",
@@ -682,7 +737,7 @@ impl WorkspaceView {
             .collect();
         let filtered = filter_sockets_unified(
             &snap.sockets,
-            &self.port_query,
+            &self.port_query.text,
             self.port_proto,
             |pid| name_by_pid.get(&pid).cloned(),
         );
@@ -692,15 +747,14 @@ impl WorkspaceView {
             .flex_row()
             .items_center()
             .gap_1()
-            .child(search_box(
+            .child(text_input_box(
                 "port-q",
                 &self.port_query,
                 "搜索端口、地址或进程名",
                 self.active_field == ActiveField::Port,
-                cx.listener(|this, _, _, cx| {
-                    this.active_field = ActiveField::Port;
-                    cx.notify();
-                }),
+                px(280.),
+                ActiveField::Port,
+                cx,
             ))
             .child(ChipButton::new(
                 "proto-all",
@@ -855,16 +909,14 @@ impl WorkspaceView {
             .flex_row()
             .items_center()
             .gap_1()
-            .child(file_path_box(
+            .child(text_input_box(
                 "file-q",
                 &self.file_query,
                 "文件/目录路径（建议管理员）",
                 self.active_field == ActiveField::File,
-                cx.listener(|this, _, _, cx| {
-                    this.active_field = ActiveField::File;
-                    this.file_query.select_all();
-                    cx.notify();
-                }),
+                px(420.),
+                ActiveField::File,
+                cx,
             ))
             .child(
                 ToolButton::new(
@@ -968,7 +1020,7 @@ impl WorkspaceView {
     fn render_dns_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let dns = self.store.read(cx).dns.clone();
         let supports_remove = dns.supports_remove_entry;
-        let entries = filter_dns_entries(&dns.entries, &self.dns_query);
+        let entries = filter_dns_entries(&dns.entries, &self.dns_query.text);
         let store = self.store.clone();
         let store2 = self.store.clone();
 
@@ -994,15 +1046,14 @@ impl WorkspaceView {
                             .child("DNS 缓存"),
                     )
                     .child(div().flex_1())
-                    .child(search_box(
+                    .child(text_input_box(
                         "dns-q",
                         &self.dns_query,
                         "搜索域名 / IP",
                         self.active_field == ActiveField::Dns,
-                        cx.listener(|this, _, _, cx| {
-                            this.active_field = ActiveField::Dns;
-                            cx.notify();
-                        }),
+                        px(280.),
+                        ActiveField::Dns,
+                        cx,
                     ))
                     .child(ToolButton::new("dns-refresh", "刷新", {
                         let store = store.clone();
@@ -1757,37 +1808,17 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    fn type_into_active(&mut self, ch: &str) {
+    fn active_edit_mut(&mut self) -> &mut TextEdit {
         match self.active_field {
-            ActiveField::Process => self.process_query.push_str(ch),
-            ActiveField::Port => self.port_query.push_str(ch),
-            ActiveField::File => self.file_query.insert(ch),
-            ActiveField::Dns => self.dns_query.push_str(ch),
-        }
-    }
-
-    fn backspace_active(&mut self) {
-        match self.active_field {
-            ActiveField::Process => {
-                self.process_query.pop();
-            }
-            ActiveField::Port => {
-                self.port_query.pop();
-            }
-            ActiveField::File => self.file_query.backspace(),
-            ActiveField::Dns => {
-                self.dns_query.pop();
-            }
+            ActiveField::Process => &mut self.process_query,
+            ActiveField::Port => &mut self.port_query,
+            ActiveField::File => &mut self.file_query,
+            ActiveField::Dns => &mut self.dns_query,
         }
     }
 
     fn clear_active(&mut self) {
-        match self.active_field {
-            ActiveField::Process => self.process_query.clear(),
-            ActiveField::Port => self.port_query.clear(),
-            ActiveField::File => self.file_query.clear(),
-            ActiveField::Dns => self.dns_query.clear(),
-        }
+        self.active_edit_mut().clear();
     }
 }
 
@@ -1876,44 +1907,13 @@ impl Render for WorkspaceView {
                     }
                 }
 
-                if this.active_field == ActiveField::File {
-                    if event.keystroke.key == "enter" {
-                        let q = this.file_query.text.clone();
-                        this.store.update(cx, |s, cx| s.search_path_holders(q, cx));
-                        cx.notify();
-                        return;
-                    }
-                    if event.keystroke.key == "escape" {
-                        if this.detail_open {
-                            this.detail_open = false;
-                        } else {
-                            this.file_query.clear();
-                        }
-                        cx.notify();
-                        return;
-                    }
-                    if this.file_query.handle_key(event, cx) {
-                        cx.notify();
-                        return;
-                    }
-                    let mods = &event.keystroke.modifiers;
-                    if !(mods.control || mods.platform || mods.alt) {
-                        if let Some(ch) = TextEdit::typed_from_keystroke(&event.keystroke) {
-                            this.file_query.insert(&ch);
-                            cx.notify();
-                        }
-                    }
-                    return;
-                }
-
-                if event.keystroke.key == "enter" {
-                    return;
-                }
-                if event.keystroke.key == "backspace" {
-                    this.backspace_active();
+                if this.active_field == ActiveField::File && event.keystroke.key == "enter" {
+                    let q = this.file_query.text.clone();
+                    this.store.update(cx, |s, cx| s.search_path_holders(q, cx));
                     cx.notify();
                     return;
                 }
+
                 if event.keystroke.key == "escape" {
                     if this.detail_copy.is_some() {
                         this.detail_copy = None;
@@ -1922,6 +1922,7 @@ impl Render for WorkspaceView {
                     }
                     if this.detail_open {
                         this.detail_open = false;
+                        this.detail_copy = None;
                         cx.notify();
                         return;
                     }
@@ -1929,12 +1930,14 @@ impl Render for WorkspaceView {
                     cx.notify();
                     return;
                 }
-                if let Some(ch) = event.keystroke.key_char.as_ref() {
-                    if !ch.is_empty() && !event.keystroke.modifiers.control {
-                        this.type_into_active(ch);
-                        cx.notify();
-                    }
+
+                if this.active_edit_mut().handle_key(event, cx) {
+                    this.active_edit_mut().caret_visible = true;
+                    this.start_caret_blink(cx);
+                    cx.notify();
+                    return;
                 }
+                // Printable text (incl. Chinese) comes via EntityInputHandler / WM_CHAR.
             }))
             .size_full()
             .relative()
@@ -1943,6 +1946,39 @@ impl Render for WorkspaceView {
             .bg(theme::BG)
             .text_color(theme::TEXT)
             .font_family(theme::FONT_UI)
+            .child(
+                canvas(
+                    {
+                        let entity = cx.entity();
+                        move |bounds, _, cx| {
+                            entity.update(cx, |this, _| {
+                                // Keep a fallback bounds for IME candidate positioning.
+                                if this.input_bounds.is_none() {
+                                    this.input_bounds = Some(bounds);
+                                }
+                            });
+                            bounds
+                        }
+                    },
+                    {
+                        let entity = cx.entity();
+                        move |_bounds, _, window, cx| {
+                            let focus = entity.read(cx).focus.clone();
+                            let input_bounds = entity
+                                .read(cx)
+                                .input_bounds
+                                .unwrap_or(_bounds);
+                            window.handle_input(
+                                &focus,
+                                ElementInputHandler::new(input_bounds, entity.clone()),
+                                cx,
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .size(px(0.)),
+            )
             .child(self.render_sidebar(cx))
             .child(
                 div()
@@ -1956,6 +1992,139 @@ impl Render for WorkspaceView {
                     .child(self.render_status_bar(cx)),
             )
             .child(self.render_modals(cx))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if !this.input_selecting || this.detail_copy.is_some() {
+                    return;
+                }
+                let idx = this.index_at_pointer(event.position);
+                this.active_edit_mut().set_caret(idx, true);
+                this.active_edit_mut().caret_visible = true;
+                cx.notify();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.input_selecting {
+                        this.input_selecting = false;
+                        cx.notify();
+                    }
+                }),
+            )
+    }
+}
+
+impl EntityInputHandler for WorkspaceView {
+    fn text_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let edit = if self.detail_copy.is_some() {
+            &self.detail_edit
+        } else {
+            self.active_edit()
+        };
+        let start = TextEdit::utf16_to_char(&edit.text, range.start);
+        let end = TextEdit::utf16_to_char(&edit.text, range.end);
+        *adjusted_range = Some(
+            TextEdit::char_to_utf16(&edit.text, start)..TextEdit::char_to_utf16(&edit.text, end),
+        );
+        Some(edit.text.chars().skip(start).take(end.saturating_sub(start)).collect())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let edit = if self.detail_copy.is_some() {
+            &self.detail_edit
+        } else {
+            self.active_edit()
+        };
+        Some(UTF16Selection {
+            range: edit.selection_utf16(),
+            reversed: edit.cursor < edit.anchor,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        let edit = if self.detail_copy.is_some() {
+            &self.detail_edit
+        } else {
+            self.active_edit()
+        };
+        edit.marked.map(|(lo, hi)| {
+            TextEdit::char_to_utf16(&edit.text, lo)..TextEdit::char_to_utf16(&edit.text, hi)
+        })
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        if self.detail_copy.is_some() {
+            self.detail_edit.unmark();
+        } else {
+            self.active_edit_mut().unmark();
+        }
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.detail_copy.is_some() {
+            return;
+        }
+        self.active_edit_mut().replace_utf16_range(range, text);
+        self.start_caret_blink(cx);
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.detail_copy.is_some() {
+            return;
+        }
+        self.active_edit_mut()
+            .replace_and_mark_utf16(range, new_text, new_selected_range);
+        self.start_caret_blink(cx);
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: std::ops::Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        Some(self.input_bounds.unwrap_or(element_bounds))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let edit = self.active_edit();
+        let idx = self.index_at_pointer(point);
+        Some(TextEdit::char_to_utf16(&edit.text, idx))
     }
 }
 
@@ -1990,16 +2159,19 @@ fn nav_item(
     )
 }
 
-fn search_box(
+fn text_input_box(
     id: impl Into<ElementId>,
-    value: &str,
+    edit: &TextEdit,
     placeholder: &str,
     active: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    width: Pixels,
+    field: ActiveField,
+    cx: &mut Context<WorkspaceView>,
 ) -> impl IntoElement {
+    let entity = cx.entity();
     div()
         .id(id)
-        .w(px(280.))
+        .w(width)
         .h(px(28.))
         .px_2()
         .rounded(px(theme::RADIUS_SM))
@@ -2012,19 +2184,51 @@ fn search_box(
         })
         .flex()
         .items_center()
+        .min_w_0()
+        .overflow_hidden()
         .text_sm()
-        .text_color(if value.is_empty() {
-            theme::TEXT_MUTED
-        } else {
-            theme::TEXT
-        })
         .cursor_text()
-        .child(if value.is_empty() {
-            placeholder.to_string()
-        } else {
-            value.to_string()
-        })
-        .on_click(on_click)
+        .relative()
+        .child(edit.render_content(active, placeholder))
+        .child(
+            canvas(
+                {
+                    let entity = entity.clone();
+                    move |bounds, _, cx| {
+                        entity.update(cx, |this, _| {
+                            if this.active_field == field {
+                                this.input_bounds = Some(bounds);
+                            }
+                        });
+                        bounds
+                    }
+                },
+                |_bounds, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+            .size_full(),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.detail_copy = None;
+                this.active_field = field;
+                this.focus.focus(window);
+                this.start_caret_blink(cx);
+                if event.click_count >= 2 {
+                    this.active_edit_mut().select_all();
+                    this.input_selecting = false;
+                } else {
+                    // Ensure bounds exist for this field before hit-test.
+                    let idx = this.index_at_pointer(event.position);
+                    this.active_edit_mut()
+                        .set_caret(idx, event.modifiers.shift);
+                    this.input_selecting = true;
+                }
+                cx.notify();
+            }),
+        )
 }
 
 fn copyable_detail_row(
@@ -2077,36 +2281,6 @@ fn copyable_detail_row(
                 },
             ),
         )
-        .on_click(on_click)
-}
-
-fn file_path_box(
-    id: impl Into<ElementId>,
-    edit: &TextEdit,
-    placeholder: &str,
-    active: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(px(420.))
-        .h(px(28.))
-        .px_2()
-        .rounded(px(theme::RADIUS_SM))
-        .bg(theme::PANEL_BG)
-        .border_1()
-        .border_color(if active {
-            theme::ACCENT
-        } else {
-            theme::BORDER
-        })
-        .flex()
-        .items_center()
-        .min_w_0()
-        .overflow_hidden()
-        .text_sm()
-        .cursor_text()
-        .child(edit.render_content(active, placeholder))
         .on_click(on_click)
 }
 

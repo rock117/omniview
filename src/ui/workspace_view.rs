@@ -347,21 +347,6 @@ impl WorkspaceView {
                     this.view_mode = ProcessViewMode::Tree;
                     cx.notify();
                 }),
-            ))
-            .child(sort_chip(self, "sort-cpu", "CPU", ProcessSortKey::Cpu, cx))
-            .child(sort_chip(
-                self,
-                "sort-mem",
-                "内存",
-                ProcessSortKey::Memory,
-                cx,
-            ))
-            .child(sort_chip(
-                self,
-                "sort-name",
-                "名称",
-                ProcessSortKey::Name,
-                cx,
             ));
 
         let rows = match self.view_mode {
@@ -375,13 +360,98 @@ impl WorkspaceView {
             .size_full()
             .bg(theme::PANEL_BG)
             .child(self.render_page_header("进程", tools))
-            .child(process_table_header())
+            .child(self.process_table_header(cx))
             .child(
                 div()
                     .id("proc-list")
                     .flex_1()
                     .overflow_y_scroll()
                     .children(rows),
+            )
+    }
+
+    fn toggle_process_sort(&mut self, key: ProcessSortKey) {
+        if self.sort_key == key {
+            self.sort_dir = self.sort_dir.toggle();
+        } else {
+            self.sort_key = key;
+            self.sort_dir = match key {
+                ProcessSortKey::Name => SortDir::Asc,
+                _ => SortDir::Desc,
+            };
+        }
+    }
+
+    fn process_table_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sort_key = self.sort_key;
+        let sort_dir = self.sort_dir;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(28.))
+            .w_full()
+            .px_3()
+            .gap_2()
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .bg(theme::SIDEBAR_BG)
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(div().w(px(theme::COL_TREE)))
+            .child(sortable_header_cell(
+                "hdr-name",
+                "名称",
+                theme::COL_NAME,
+                false,
+                sort_key == ProcessSortKey::Name,
+                sort_dir,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_process_sort(ProcessSortKey::Name);
+                    cx.notify();
+                }),
+            ))
+            .child(sortable_header_cell(
+                "hdr-pid",
+                "PID",
+                theme::COL_PID,
+                true,
+                sort_key == ProcessSortKey::Pid,
+                sort_dir,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_process_sort(ProcessSortKey::Pid);
+                    cx.notify();
+                }),
+            ))
+            .child(sortable_header_cell(
+                "hdr-cpu",
+                "CPU",
+                theme::COL_CPU,
+                true,
+                sort_key == ProcessSortKey::Cpu,
+                sort_dir,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_process_sort(ProcessSortKey::Cpu);
+                    cx.notify();
+                }),
+            ))
+            .child(sortable_header_cell(
+                "hdr-mem",
+                "内存",
+                theme::COL_MEM,
+                true,
+                sort_key == ProcessSortKey::Memory,
+                sort_dir,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_process_sort(ProcessSortKey::Memory);
+                    cx.notify();
+                }),
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(theme::TEXT_MUTED)
+                    .child("路径"),
             )
     }
 
@@ -1920,38 +1990,6 @@ fn nav_item(
     )
 }
 
-fn sort_chip(
-    this: &WorkspaceView,
-    id: &'static str,
-    label: &'static str,
-    key: ProcessSortKey,
-    cx: &mut Context<WorkspaceView>,
-) -> ChipButton {
-    let active = this.sort_key == key;
-    let mark = if active {
-        match this.sort_dir {
-            SortDir::Asc => " ↑",
-            SortDir::Desc => " ↓",
-        }
-    } else {
-        ""
-    };
-    ChipButton::new(
-        id,
-        format!("{label}{mark}"),
-        active,
-        cx.listener(move |this, _, _, cx| {
-            if this.sort_key == key {
-                this.sort_dir = this.sort_dir.toggle();
-            } else {
-                this.sort_key = key;
-                this.sort_dir = SortDir::Desc;
-            }
-            cx.notify();
-        }),
-    )
-}
-
 fn search_box(
     id: impl Into<ElementId>,
     value: &str,
@@ -2072,53 +2110,43 @@ fn file_path_box(
         .on_click(on_click)
 }
 
-fn process_table_header() -> impl IntoElement {
-    div()
+fn sortable_header_cell(
+    id: impl Into<ElementId>,
+    label: &str,
+    width: f32,
+    end_align: bool,
+    active: bool,
+    dir: SortDir,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let mark = if active {
+        match dir {
+            SortDir::Asc => " ↑",
+            SortDir::Desc => " ↓",
+        }
+    } else {
+        ""
+    };
+    let mut cell = div()
+        .id(id)
+        .w(px(width))
+        .min_w(px(width))
+        .h_full()
         .flex()
-        .flex_row()
         .items_center()
-        .h(px(28.))
-        .w_full()
-        .px_3()
-        .gap_2()
-        .border_b_1()
-        .border_color(theme::BORDER)
-        .bg(theme::SIDEBAR_BG)
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme::TEXT_MUTED)
-        .child(div().w(px(theme::COL_TREE)))
-        .child(
-            div()
-                .w(px(theme::COL_NAME))
-                .min_w(px(theme::COL_NAME))
-                .child("名称"),
-        )
-        .child(
-            div()
-                .w(px(theme::COL_PID))
-                .min_w(px(theme::COL_PID))
-                .flex()
-                .justify_end()
-                .child("PID"),
-        )
-        .child(
-            div()
-                .w(px(theme::COL_CPU))
-                .min_w(px(theme::COL_CPU))
-                .flex()
-                .justify_end()
-                .child("CPU"),
-        )
-        .child(
-            div()
-                .w(px(theme::COL_MEM))
-                .min_w(px(theme::COL_MEM))
-                .flex()
-                .justify_end()
-                .child("内存"),
-        )
-        .child(div().flex_1().child("路径"))
+        .cursor_pointer()
+        .hover(|s| s.text_color(theme::TEXT))
+        .text_color(if active {
+            theme::ACCENT
+        } else {
+            theme::TEXT_MUTED
+        })
+        .child(format!("{label}{mark}"))
+        .on_click(on_click);
+    if end_align {
+        cell = cell.justify_end();
+    }
+    cell
 }
 
 fn col_header(cols: &[(&str, f32)]) -> impl IntoElement {

@@ -6,19 +6,18 @@ use gpui::*;
 
 use crate::collect::{PendingAction, SnapshotEvent, SnapshotStore, SystemSnapshot};
 use crate::domain::{
-    children_map, filter_dns_entries, filter_processes, filter_sockets, format_bytes,
+    children_map, filter_dns_entries, filter_processes, filter_sockets_unified, format_bytes,
     is_common_proxy_port, sort_processes, HealthLevel, MainPane, Pid, ProcessInfo, ProcessSortKey,
-    ProcessViewMode, Protocol, SortDir, SocketState,
+    ProcessViewMode, Protocol, SortDir, SocketState, REFRESH_PRESETS_MS,
 };
 use crate::shared::actions::*;
 use crate::shared::theme;
-use crate::ui::widgets::{ChipButton, ToolButton};
+use crate::ui::widgets::{ChipButton, NavItem, ToolButton};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActiveField {
     Process,
     Port,
-    PortProc,
     File,
     Dns,
 }
@@ -28,7 +27,6 @@ pub struct WorkspaceView {
     pane: MainPane,
     process_query: String,
     port_query: String,
-    port_proc_query: String,
     port_proto: Option<Protocol>,
     file_query: String,
     dns_query: String,
@@ -38,6 +36,7 @@ pub struct WorkspaceView {
     view_mode: ProcessViewMode,
     expanded: HashSet<Pid>,
     selected_pid: Option<Pid>,
+    detail_open: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -51,7 +50,6 @@ impl WorkspaceView {
             pane: MainPane::Processes,
             process_query: String::new(),
             port_query: String::new(),
-            port_proc_query: String::new(),
             port_proto: None,
             file_query: String::new(),
             dns_query: String::new(),
@@ -61,6 +59,7 @@ impl WorkspaceView {
             view_mode: ProcessViewMode::List,
             expanded: HashSet::new(),
             selected_pid: None,
+            detail_open: false,
             focus,
             _subs: Vec::new(),
         };
@@ -93,80 +92,141 @@ impl WorkspaceView {
         self.store.read(cx).snapshot.clone()
     }
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(theme::NAV_WIDTH))
+            .h_full()
+            .bg(theme::SIDEBAR_BG)
+            .border_r_1()
+            .border_color(theme::BORDER)
+            .flex()
+            .flex_col()
+            .pt_3()
+            .px_2()
+            .child(
+                div()
+                    .px_2()
+                    .pb_3()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::TEXT)
+                    .child("Omniview"),
+            )
+            .child(nav_item(self, "进程", MainPane::Processes, cx))
+            .child(nav_item(self, "端口", MainPane::Ports, cx))
+            .child(nav_item(self, "文件", MainPane::Files, cx))
+            .child(nav_item(self, "DNS", MainPane::Dns, cx))
+            .child(nav_item(self, "代理排障", MainPane::Proxy, cx))
+            .child(div().flex_1())
+            .child(nav_item(self, "设置", MainPane::Settings, cx))
+            .child(
+                div()
+                    .px_2()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(theme::TEXT_MUTED)
+                    .child("Ctrl+, 打开设置"),
+            )
+    }
+
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
-        let auto = store.refresh.auto;
-        let interval = store.refresh.interval_ms;
+        let auto = store.settings.refresh.auto;
+        let interval = store.settings.refresh.interval_ms;
         let busy = store.busy;
-        let last = store.snapshot.collected_at_ms;
+        let count = store.snapshot.processes.len();
+        let socks = store.snapshot.sockets.len();
         let err = store.last_error.clone();
         let store_e = self.store.clone();
 
+        div()
+            .h(px(theme::STATUS_HEIGHT))
+            .w_full()
+            .px_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .bg(theme::SIDEBAR_BG)
+            .border_t_1()
+            .border_color(theme::BORDER)
+            .text_xs()
+            .text_color(theme::TEXT_MUTED)
+            .child(format!("{count} 进程 · {socks} 连接"))
+            .child(div().flex_1())
+            .when_some(err, |el, e| {
+                el.child(div().text_color(theme::DANGER).child(e))
+            })
+            .child(if busy { "刷新中…" } else { "就绪" })
+            .child(
+                div()
+                    .id("status-refresh-mode")
+                    .cursor_pointer()
+                    .text_color(if auto {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_MUTED
+                    })
+                    .child(if auto {
+                        format!("自动 {interval}ms")
+                    } else {
+                        "仅手动".into()
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pane = MainPane::Settings;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("status-settings")
+                    .cursor_pointer()
+                    .text_color(theme::ACCENT)
+                    .child("设置")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pane = MainPane::Settings;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("status-refresh")
+                    .cursor_pointer()
+                    .text_color(theme::ACCENT)
+                    .child("刷新 F5")
+                    .on_click({
+                        let store = store_e;
+                        move |_, _, cx| {
+                            store.update(cx, |s, cx| s.request_refresh(cx));
+                        }
+                    }),
+            )
+    }
+
+    fn render_page_header(
+        &self,
+        title: &str,
+        trailing: impl IntoElement,
+    ) -> impl IntoElement {
         div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
             .px_3()
-            .py_2()
+            .h(px(44.))
             .border_b_1()
             .border_color(theme::BORDER)
-            .bg(theme::SIDEBAR_BG)
-            .child(nav_chip(self, "进程", MainPane::Processes, cx))
-            .child(nav_chip(self, "端口", MainPane::Ports, cx))
-            .child(nav_chip(self, "文件", MainPane::Files, cx))
-            .child(nav_chip(self, "DNS", MainPane::Dns, cx))
-            .child(nav_chip(self, "代理排障", MainPane::Proxy, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(theme::TEXT_MUTED)
-                    .child(if busy {
-                        "刷新中…".to_string()
-                    } else {
-                        format!("就绪 · 采样 {last}")
-                    }),
-            )
-            .child(ToolButton::new("refresh", "刷新 F5", {
-                let store = store_e.clone();
-                move |_, _, cx| store.update(cx, |s, cx| s.request_refresh(cx))
-            }))
-            .child(ToolButton::new(
-                "auto",
-                if auto { "自动:开" } else { "自动:关" },
-                {
-                    let store = store_e.clone();
-                    move |_, _, cx| {
-                        store.update(cx, |s, cx| s.set_auto(!s.refresh.auto, cx));
-                    }
-                },
-            ))
-            .child(ToolButton::new("int-down", "频率-", {
-                let store = store_e.clone();
-                move |_, _, cx| {
-                    store.update(cx, |s, cx| {
-                        s.set_interval_ms(s.refresh.interval_ms.saturating_sub(500).max(500), cx);
-                    });
-                }
-            }))
+            .bg(theme::PANEL_BG)
             .child(
                 div()
                     .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::TEXT)
-                    .child(format!("{interval}ms")),
+                    .child(title.to_string()),
             )
-            .child(ToolButton::new("int-up", "频率+", {
-                let store = store_e;
-                move |_, _, cx| {
-                    store.update(cx, |s, cx| {
-                        s.set_interval_ms((s.refresh.interval_ms + 500).min(10_000), cx);
-                    });
-                }
-            }))
-            .when_some(err, |el, e| {
-                el.child(div().text_xs().text_color(theme::DANGER).child(e))
-            })
+            .child(div().flex_1())
+            .child(trailing)
     }
 
     fn render_process_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -177,20 +237,21 @@ impl WorkspaceView {
             .into_iter()
             .cloned()
             .collect();
+        let mem_peak = filtered
+            .iter()
+            .map(|p| p.memory_bytes)
+            .max()
+            .unwrap_or(1);
 
-        let header = div()
+        let tools = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(theme::BORDER)
+            .gap_1()
             .child(search_box(
                 "proc-q",
                 &self.process_query,
-                "搜索进程（名称 / PID / 路径）…",
+                "搜索名称、PID 或路径",
                 self.active_field == ActiveField::Process,
                 cx.listener(|this, _, _, cx| {
                     this.active_field = ActiveField::Process;
@@ -232,22 +293,17 @@ impl WorkspaceView {
             ));
 
         let rows = match self.view_mode {
-            ProcessViewMode::List => self.render_process_rows_flat(&filtered, cx),
-            ProcessViewMode::Tree => self.render_process_rows_tree(&filtered, cx),
+            ProcessViewMode::List => self.render_process_rows_flat(&filtered, mem_peak, cx),
+            ProcessViewMode::Tree => self.render_process_rows_tree(&filtered, mem_peak, cx),
         };
 
         div()
             .flex()
             .flex_col()
             .size_full()
-            .child(header)
-            .child(col_header(&[
-                ("PID", 70.),
-                ("名称", 0.),
-                ("CPU%", 70.),
-                ("内存", 90.),
-                ("路径", 0.),
-            ]))
+            .bg(theme::PANEL_BG)
+            .child(self.render_page_header("进程", tools))
+            .child(process_table_header())
             .child(
                 div()
                     .id("proc-list")
@@ -260,16 +316,21 @@ impl WorkspaceView {
     fn render_process_rows_flat(
         &self,
         list: &[ProcessInfo],
+        mem_peak: u64,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         list.iter()
-            .map(|p| self.process_row(p, 0, false, cx).into_any_element())
+            .map(|p| {
+                self.process_row(p, 0, false, mem_peak, cx)
+                    .into_any_element()
+            })
             .collect()
     }
 
     fn render_process_rows_tree(
         &mut self,
         list: &[ProcessInfo],
+        mem_peak: u64,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let by_pid: HashMap<Pid, ProcessInfo> =
@@ -290,7 +351,7 @@ impl WorkspaceView {
         }
         let mut out = Vec::new();
         for root in roots {
-            self.walk_tree(root, 0, &by_pid, &kids, &mut out, cx);
+            self.walk_tree(root, 0, &by_pid, &kids, mem_peak, &mut out, cx);
         }
         out
     }
@@ -301,6 +362,7 @@ impl WorkspaceView {
         depth: u32,
         by_pid: &HashMap<Pid, ProcessInfo>,
         kids: &HashMap<Pid, Vec<Pid>>,
+        mem_peak: u64,
         out: &mut Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) {
@@ -309,13 +371,13 @@ impl WorkspaceView {
         };
         let has_kids = kids.get(&pid).map(|k| !k.is_empty()).unwrap_or(false);
         out.push(
-            self.process_row(proc_, depth, has_kids, cx)
+            self.process_row(proc_, depth, has_kids, mem_peak, cx)
                 .into_any_element(),
         );
         if has_kids && self.expanded.contains(&pid) {
             if let Some(children) = kids.get(&pid) {
                 for child in children {
-                    self.walk_tree(*child, depth + 1, by_pid, kids, out, cx);
+                    self.walk_tree(*child, depth + 1, by_pid, kids, mem_peak, out, cx);
                 }
             }
         }
@@ -326,86 +388,136 @@ impl WorkspaceView {
         p: &ProcessInfo,
         depth: u32,
         has_kids: bool,
+        mem_peak: u64,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.selected_pid == Some(p.pid);
         let pid = p.pid;
         let name = p.name.clone();
         let expanded = self.expanded.contains(&pid);
-        let indent = px(12.0 * depth as f32);
+        let indent = px(14.0 * depth as f32);
+        let cpu_bg = theme::cpu_heat(p.cpu_percent);
+        let mem_bg = theme::mem_heat(p.memory_bytes, mem_peak);
+        let path = p.exe_path.clone().unwrap_or_default();
 
         div()
             .id(ElementId::Name(format!("proc-{pid}").into()))
+            .h(px(theme::ROW_HEIGHT))
+            .w_full()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
             .px_3()
-            .py_1()
-            .pl(px(12.0) + indent)
+            .gap_2()
+            .border_b_1()
+            .border_color(theme::BORDER_SUBTLE)
             .bg(if selected {
                 theme::SELECTED
             } else {
-                theme::BG
+                theme::PANEL_BG
             })
             .hover(|s| s.bg(theme::HOVER))
             .cursor_pointer()
-            .child(if has_kids {
-                ToolButton::new(
-                    ElementId::Name(format!("exp-{pid}").into()),
-                    if expanded { "▼" } else { "▶" },
-                    cx.listener(move |this, _, _, cx| {
-                        if !this.expanded.insert(pid) {
-                            this.expanded.remove(&pid);
-                        }
-                        cx.notify();
+            // Tree toggle — fixed width so columns stay aligned.
+            .child(
+                div()
+                    .w(px(theme::COL_TREE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(if has_kids {
+                        div()
+                            .id(ElementId::Name(format!("exp-{pid}").into()))
+                            .text_xs()
+                            .text_color(theme::TEXT_MUTED)
+                            .cursor_pointer()
+                            .child(if expanded { "▼" } else { "▶" })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.expanded.insert(pid) {
+                                    this.expanded.remove(&pid);
+                                }
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
                     }),
-                )
-                .into_any_element()
-            } else {
-                div().w(px(28.)).into_any_element()
-            })
-            .child(
-                div()
-                    .w(px(70.))
-                    .text_sm()
-                    .text_color(theme::TEXT_MUTED)
-                    .child(pid.to_string()),
             )
+            // Name — fixed width; tree indent only inside this cell.
             .child(
                 div()
-                    .flex_1()
+                    .w(px(theme::COL_NAME))
+                    .min_w(px(theme::COL_NAME))
+                    .max_w(px(theme::COL_NAME))
+                    .pl(indent)
+                    .overflow_hidden()
                     .text_sm()
                     .text_color(theme::TEXT)
+                    .whitespace_nowrap()
                     .child(name.clone()),
             )
             .child(
                 div()
-                    .w(px(70.))
+                    .w(px(theme::COL_PID))
+                    .min_w(px(theme::COL_PID))
+                    .flex()
+                    .justify_end()
                     .text_sm()
-                    .child(format!("{:.1}", p.cpu_percent)),
+                    .text_color(theme::TEXT_MUTED)
+                    .font_family("Consolas")
+                    .child(pid.to_string()),
             )
             .child(
                 div()
-                    .w(px(90.))
+                    .w(px(theme::COL_CPU))
+                    .min_w(px(theme::COL_CPU))
+                    .h(px(22.))
+                    .px_1()
+                    .rounded(px(2.))
+                    .bg(cpu_bg)
+                    .flex()
+                    .items_center()
+                    .justify_end()
                     .text_sm()
+                    .font_family("Consolas")
+                    .child(format!("{:.1}%", p.cpu_percent)),
+            )
+            .child(
+                div()
+                    .w(px(theme::COL_MEM))
+                    .min_w(px(theme::COL_MEM))
+                    .h(px(22.))
+                    .px_1()
+                    .rounded(px(2.))
+                    .bg(mem_bg)
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .text_sm()
+                    .font_family("Consolas")
                     .child(format_bytes(p.memory_bytes)),
             )
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(80.))
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(theme::TEXT_MUTED)
-                    .child(p.exe_path.clone().unwrap_or_default()),
+                    .whitespace_nowrap()
+                    .child(path),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected_pid = Some(pid);
+                this.detail_open = true;
+                this.store.update(cx, |s, cx| s.load_process_files(pid, cx));
                 cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, _, _, cx| {
                     this.selected_pid = Some(pid);
+                    this.detail_open = true;
                     this.store.update(cx, |s, cx| {
                         s.ask_kill(pid, name.clone(), false, cx);
                     });
@@ -420,88 +532,75 @@ impl WorkspaceView {
             .iter()
             .map(|p| (p.pid, p.name.clone()))
             .collect();
-        let filtered = filter_sockets(
+        let filtered = filter_sockets_unified(
             &snap.sockets,
             &self.port_query,
-            &self.port_proc_query,
             self.port_proto,
             |pid| name_by_pid.get(&pid).cloned(),
         );
+
+        let tools = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(search_box(
+                "port-q",
+                &self.port_query,
+                "搜索端口、地址或进程名",
+                self.active_field == ActiveField::Port,
+                cx.listener(|this, _, _, cx| {
+                    this.active_field = ActiveField::Port;
+                    cx.notify();
+                }),
+            ))
+            .child(ChipButton::new(
+                "proto-all",
+                "全部",
+                self.port_proto.is_none(),
+                cx.listener(|this, _, _, cx| {
+                    this.port_proto = None;
+                    cx.notify();
+                }),
+            ))
+            .child(ChipButton::new(
+                "proto-tcp",
+                "TCP",
+                self.port_proto == Some(Protocol::Tcp),
+                cx.listener(|this, _, _, cx| {
+                    this.port_proto = Some(Protocol::Tcp);
+                    cx.notify();
+                }),
+            ))
+            .child(ChipButton::new(
+                "proto-udp",
+                "UDP",
+                self.port_proto == Some(Protocol::Udp),
+                cx.listener(|this, _, _, cx| {
+                    this.port_proto = Some(Protocol::Udp);
+                    cx.notify();
+                }),
+            ))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::TEXT_MUTED)
+                    .child(format!("{} 条", filtered.len())),
+            );
 
         div()
             .flex()
             .flex_col()
             .size_full()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme::BORDER)
-                    .child(search_box(
-                        "port-q",
-                        &self.port_query,
-                        "按端口搜索…",
-                        self.active_field == ActiveField::Port,
-                        cx.listener(|this, _, _, cx| {
-                            this.active_field = ActiveField::Port;
-                            cx.notify();
-                        }),
-                    ))
-                    .child(search_box(
-                        "port-proc-q",
-                        &self.port_proc_query,
-                        "按进程名搜索…",
-                        self.active_field == ActiveField::PortProc,
-                        cx.listener(|this, _, _, cx| {
-                            this.active_field = ActiveField::PortProc;
-                            cx.notify();
-                        }),
-                    ))
-                    .child(ChipButton::new(
-                        "proto-all",
-                        "全部",
-                        self.port_proto.is_none(),
-                        cx.listener(|this, _, _, cx| {
-                            this.port_proto = None;
-                            cx.notify();
-                        }),
-                    ))
-                    .child(ChipButton::new(
-                        "proto-tcp",
-                        "TCP",
-                        self.port_proto == Some(Protocol::Tcp),
-                        cx.listener(|this, _, _, cx| {
-                            this.port_proto = Some(Protocol::Tcp);
-                            cx.notify();
-                        }),
-                    ))
-                    .child(ChipButton::new(
-                        "proto-udp",
-                        "UDP",
-                        self.port_proto == Some(Protocol::Udp),
-                        cx.listener(|this, _, _, cx| {
-                            this.port_proto = Some(Protocol::Udp);
-                            cx.notify();
-                        }),
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::TEXT_MUTED)
-                            .child(format!("{} 条", filtered.len())),
-                    ),
-            )
+            .bg(theme::PANEL_BG)
+            .child(self.render_page_header("端口", tools))
             .child(col_header(&[
+                ("", 6.),
                 ("协议", 50.),
-                ("本地", 140.),
-                ("远程", 140.),
-                ("状态", 100.),
-                ("PID", 70.),
+                ("本地", 150.),
+                ("远程", 150.),
+                ("状态", 110.),
+                ("PID", 72.),
                 ("进程", 0.),
             ]))
             .child(
@@ -531,23 +630,28 @@ impl WorkspaceView {
                                 )
                                 .into(),
                             ))
+                            .h(px(theme::ROW_HEIGHT))
                             .flex()
                             .flex_row()
+                            .items_center()
                             .gap_2()
                             .px_3()
-                            .py_1()
-                            .bg(if proxy_hl {
-                                Hsla {
-                                    h: 0.48,
-                                    s: 0.35,
-                                    l: 0.18,
-                                    a: 1.0,
-                                }
-                            } else {
-                                theme::BG
-                            })
+                            .border_b_1()
+                            .border_color(theme::BORDER_SUBTLE)
+                            .bg(theme::PANEL_BG)
                             .hover(|s| s.bg(theme::HOVER))
                             .cursor_pointer()
+                            .child(
+                                div()
+                                    .w(px(3.))
+                                    .h(px(16.))
+                                    .rounded(px(2.))
+                                    .bg(if proxy_hl {
+                                        theme::WARN
+                                    } else {
+                                        theme::PANEL_BG
+                                    }),
+                            )
                             .child(
                                 div()
                                     .w(px(50.))
@@ -557,28 +661,30 @@ impl WorkspaceView {
                             )
                             .child(
                                 div()
-                                    .w(px(140.))
+                                    .w(px(150.))
                                     .text_sm()
                                     .child(r.local.to_string()),
                             )
                             .child(
                                 div()
-                                    .w(px(140.))
+                                    .w(px(150.))
                                     .text_sm()
                                     .text_color(theme::TEXT_MUTED)
                                     .child(remote),
                             )
                             .child(
                                 div()
-                                    .w(px(100.))
+                                    .w(px(110.))
                                     .text_xs()
                                     .text_color(theme::TEXT_MUTED)
                                     .child(r.state.as_str()),
                             )
-                            .child(div().w(px(70.)).text_sm().child(pid.to_string()))
+                            .child(div().w(px(72.)).text_sm().child(pid.to_string()))
                             .child(div().flex_1().text_sm().child(pname))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.selected_pid = Some(pid);
+                                this.detail_open = true;
+                                this.store.update(cx, |s, cx| s.load_process_files(pid, cx));
                                 cx.notify();
                             }))
                             .into_any_element()
@@ -587,35 +693,125 @@ impl WorkspaceView {
     }
 
     fn render_file_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let search = self.store.read(cx).file_search.clone();
+        let name_by_pid: HashMap<Pid, String> = self
+            .snapshot(cx)
+            .processes
+            .iter()
+            .map(|p| (p.pid, p.name.clone()))
+            .collect();
+
+        let tools = div()
             .flex()
-            .flex_col()
-            .size_full()
-            .px_4()
-            .py_4()
-            .gap_2()
-            .child(
-                div()
-                    .text_lg()
-                    .text_color(theme::TEXT)
-                    .child("按文件 / 目录查占用"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme::TEXT_MUTED)
-                    .child("HandleProbe 已预留，Windows 句柄枚举待实现。"),
-            )
+            .flex_row()
+            .items_center()
+            .gap_1()
             .child(search_box(
                 "file-q",
                 &self.file_query,
-                "粘贴路径…",
+                "文件/目录路径（建议管理员）",
                 self.active_field == ActiveField::File,
                 cx.listener(|this, _, _, cx| {
                     this.active_field = ActiveField::File;
                     cx.notify();
                 }),
             ))
+            .child(
+                ToolButton::new(
+                    "file-search",
+                    "查询占用",
+                    cx.listener(|this, _, _, cx| {
+                        let q = this.file_query.clone();
+                        this.store.update(cx, |s, cx| s.search_path_holders(q, cx));
+                    }),
+                )
+                .primary(),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::TEXT_MUTED)
+                    .child(if search.busy {
+                        "扫描中…".to_string()
+                    } else {
+                        format!("{} 命中", search.holders.len())
+                    }),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(theme::PANEL_BG)
+            .child(self.render_page_header("文件占用", tools))
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(theme::TEXT_MUTED)
+                    .child("回车查询。句柄扫描较慢，结果可能不完整。"),
+            )
+            .when_some(search.error.clone(), |el, e| {
+                el.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(theme::DANGER)
+                        .child(e),
+                )
+            })
+            .child(col_header(&[
+                ("PID", 70.),
+                ("进程", 140.),
+                ("打开路径", 0.),
+                ("访问", 90.),
+            ]))
+            .child(
+                div()
+                    .id("file-holders")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .children(search.holders.into_iter().map(|h| {
+                        let pid = h.pid;
+                        let pname = name_by_pid
+                            .get(&pid)
+                            .cloned()
+                            .unwrap_or_else(|| "?".into());
+                        div()
+                            .id(ElementId::Name(
+                                format!("holder-{pid}-{}", h.path).into(),
+                            ))
+                            .h(px(theme::ROW_HEIGHT))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .border_b_1()
+                            .border_color(theme::BORDER_SUBTLE)
+                            .hover(|s| s.bg(theme::HOVER))
+                            .cursor_pointer()
+                            .child(div().w(px(70.)).text_sm().child(pid.to_string()))
+                            .child(div().w(px(140.)).text_sm().child(pname))
+                            .child(div().flex_1().text_xs().child(h.path))
+                            .child(
+                                div()
+                                    .w(px(90.))
+                                    .text_xs()
+                                    .text_color(theme::TEXT_MUTED)
+                                    .child(h.access.unwrap_or_default()),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.selected_pid = Some(pid);
+                                this.detail_open = true;
+                                this.store.update(cx, |s, cx| s.load_process_files(pid, cx));
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    })),
+            )
     }
 
     fn render_dns_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -629,6 +825,7 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .size_full()
+            .bg(theme::PANEL_BG)
             .child(
                 div()
                     .flex()
@@ -636,20 +833,27 @@ impl WorkspaceView {
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .py_2()
+                    .h(px(44.))
                     .border_b_1()
                     .border_color(theme::BORDER)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("DNS 缓存"),
+                    )
+                    .child(div().flex_1())
                     .child(search_box(
                         "dns-q",
                         &self.dns_query,
-                        "搜索域名 / IP…",
+                        "搜索域名 / IP",
                         self.active_field == ActiveField::Dns,
                         cx.listener(|this, _, _, cx| {
                             this.active_field = ActiveField::Dns;
                             cx.notify();
                         }),
                     ))
-                    .child(ToolButton::new("dns-refresh", "刷新缓存", {
+                    .child(ToolButton::new("dns-refresh", "刷新", {
                         let store = store.clone();
                         move |_, _, cx| store.update(cx, |s, cx| s.refresh_dns(cx))
                     }))
@@ -852,13 +1056,8 @@ impl WorkspaceView {
                     .overflow_y_scroll()
                     .children(proxy.findings.into_iter().map(|f| {
                         let color = match f.level {
-                            HealthLevel::Ok => theme::ACCENT,
-                            HealthLevel::Warn => Hsla {
-                                h: 0.12,
-                                s: 0.7,
-                                l: 0.55,
-                                a: 1.0,
-                            },
+                            HealthLevel::Ok => theme::OK,
+                            HealthLevel::Warn => theme::WARN,
                             HealthLevel::Bad => theme::DANGER,
                         };
                         let tag = match f.level {
@@ -890,24 +1089,156 @@ impl WorkspaceView {
             )
     }
 
+    fn render_settings_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let refresh = self.store.read(cx).settings.refresh.clone();
+        let path = crate::shared::persist::settings_path()
+            .to_string_lossy()
+            .to_string();
+
+        let mut presets = div().flex().flex_row().flex_wrap().gap_1();
+        for &ms in REFRESH_PRESETS_MS {
+            let active = refresh.interval_ms == ms;
+            let label = if ms >= 1000 {
+                format!("{}s", ms / 1000)
+            } else {
+                format!("{ms}ms")
+            };
+            presets = presets.child(ChipButton::new(
+                ElementId::Name(format!("preset-{ms}").into()),
+                label,
+                active,
+                cx.listener(move |this, _, _, cx| {
+                    this.store.update(cx, |s, cx| s.set_interval_ms(ms, cx));
+                }),
+            ));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(theme::PANEL_BG)
+            .child(self.render_page_header("设置", div()))
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .px_4()
+                    .py_3()
+                    .gap_4()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::TEXT)
+                            .child("刷新"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::TEXT_MUTED)
+                            .child("控制进程/端口列表的自动采样频率。DNS 与文件占用仍为手动刷新。"),
+                    )
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded(px(theme::RADIUS_MD))
+                            .border_1()
+                            .border_color(theme::BORDER)
+                            .bg(theme::SIDEBAR_BG)
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme::TEXT)
+                                            .child("自动刷新"),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(ChipButton::new(
+                                        "settings-auto-on",
+                                        "开",
+                                        refresh.auto,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.store.update(cx, |s, cx| s.set_auto(true, cx));
+                                        }),
+                                    ))
+                                    .child(ChipButton::new(
+                                        "settings-auto-off",
+                                        "关（仅手动 F5）",
+                                        !refresh.auto,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.store.update(cx, |s, cx| s.set_auto(false, cx));
+                                        }),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme::TEXT)
+                                            .child("刷新间隔"),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(presets),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::TEXT_MUTED)
+                                    .child(format!(
+                                        "当前：{} · {} ms",
+                                        if refresh.auto {
+                                            "自动"
+                                        } else {
+                                            "仅手动"
+                                        },
+                                        refresh.interval_ms
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::TEXT)
+                            .child("关于配置文件"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::TEXT_MUTED)
+                            .child(format!("设置已保存到：{path}")),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::TEXT_MUTED)
+                            .child("后续可在此扩展主题、列显示、代理端口高亮等选项。"),
+                    ),
+            )
+    }
+
     fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let snap = self.snapshot(cx);
-        let Some(pid) = self.selected_pid else {
-            return div()
-                .w(px(340.))
-                .h_full()
-                .border_l_1()
-                .border_color(theme::BORDER)
-                .bg(theme::PANEL_BG)
-                .px_3()
-                .py_3()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme::TEXT_MUTED)
-                        .child("选择进程以查看详情"),
-                )
-                .into_any_element();
+        let Some(pid) = self.selected_pid.filter(|_| self.detail_open) else {
+            return div().into_any_element();
         };
 
         let proc_ = snap.processes.iter().find(|p| p.pid == pid);
@@ -917,16 +1248,18 @@ impl WorkspaceView {
             .filter(|s| s.pid == pid)
             .cloned()
             .collect();
+        let pf = self.store.read(cx).process_files.clone();
         let store = self.store.clone();
         let store2 = self.store.clone();
+        let store3 = self.store.clone();
         let name = proc_
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "?".into());
 
         div()
-            .w(px(340.))
-            .h_full()
-            .border_l_1()
+            .w_full()
+            .h(px(theme::DETAIL_HEIGHT))
+            .border_t_1()
             .border_color(theme::BORDER)
             .bg(theme::PANEL_BG)
             .flex()
@@ -934,23 +1267,21 @@ impl WorkspaceView {
             .child(
                 div()
                     .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme::BORDER)
-                    .child(
-                        div()
-                            .text_color(theme::TEXT)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{name}  ({pid})")),
-                    ),
-            )
-            .child(
-                div()
+                    .h(px(36.))
                     .flex()
                     .flex_row()
+                    .items_center()
                     .gap_2()
-                    .px_3()
-                    .py_2()
+                    .border_b_1()
+                    .border_color(theme::BORDER_SUBTLE)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::TEXT)
+                            .child(format!("{name}  (PID {pid})")),
+                    )
+                    .child(div().flex_1())
                     .child(
                         ToolButton::new("kill", "结束进程", {
                             let store = store;
@@ -970,60 +1301,144 @@ impl WorkspaceView {
                             }
                         })
                         .danger(),
+                    )
+                    .child(ToolButton::new("load-files", "加载文件", {
+                        let store = store3;
+                        move |_, _, cx| {
+                            store.update(cx, |s, cx| s.load_process_files(pid, cx));
+                        }
+                    }))
+                    .child(
+                        div()
+                            .id("detail-close")
+                            .px_2()
+                            .cursor_pointer()
+                            .text_color(theme::TEXT_MUTED)
+                            .child("✕")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.detail_open = false;
+                                cx.notify();
+                            })),
                     ),
             )
-            .when_some(proc_.cloned(), |el, p| {
-                el.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .gap_1()
-                        .flex()
-                        .flex_col()
-                        .text_sm()
-                        .child(format!("CPU  {:.1}%", p.cpu_percent))
-                        .child(format!("内存  {}", format_bytes(p.memory_bytes)))
-                        .child(format!(
-                            "父 PID  {}",
-                            p.parent_pid
-                                .map(|x| x.to_string())
-                                .unwrap_or_else(|| "-".into())
-                        ))
-                        .child(format!(
-                            "路径  {}",
-                            p.exe_path.clone().unwrap_or_else(|| "-".into())
-                        )),
-                )
-            })
             .child(
                 div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(theme::TEXT_MUTED)
-                    .child(format!("网络（{}）", sockets.len())),
-            )
-            .child(
-                div()
-                    .id("detail-socks")
+                    .flex()
+                    .flex_row()
                     .flex_1()
-                    .overflow_y_scroll()
-                    .px_3()
-                    .children(sockets.into_iter().map(|s| {
+                    .overflow_hidden()
+                    .child(
                         div()
+                            .id("detail-info")
+                            .w(px(280.))
+                            .h_full()
+                            .px_3()
+                            .py_2()
+                            .overflow_y_scroll()
+                            .border_r_1()
+                            .border_color(theme::BORDER_SUBTLE)
+                            .when_some(proc_.cloned(), |el, p| {
+                                el.child(
+                                    div()
+                                        .gap_1()
+                                        .flex()
+                                        .flex_col()
+                                        .text_sm()
+                                        .child(format!("CPU  {:.1}%", p.cpu_percent))
+                                        .child(format!("内存  {}", format_bytes(p.memory_bytes)))
+                                        .child(format!(
+                                            "父 PID  {}",
+                                            p.parent_pid
+                                                .map(|x| x.to_string())
+                                                .unwrap_or_else(|| "-".into())
+                                        ))
+                                        .child(format!(
+                                            "路径  {}",
+                                            p.exe_path.clone().unwrap_or_else(|| "-".into())
+                                        )),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .px_2()
                             .py_1()
-                            .text_xs()
-                            .child(format!(
-                                "{} {} {} {}",
-                                s.protocol.as_str(),
-                                s.local,
-                                s.remote
-                                    .map(|r| r.to_string())
-                                    .unwrap_or_else(|| "-".into()),
-                                s.state.as_str()
-                            ))
-                            .into_any_element()
-                    })),
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::TEXT_MUTED)
+                                    .child(format!("网络（{}）", sockets.len())),
+                            )
+                            .child(
+                                div()
+                                    .id("detail-socks")
+                                    .flex_1()
+                                    .overflow_y_scroll()
+                                    .children(sockets.into_iter().map(|s| {
+                                        div()
+                                            .py_1()
+                                            .text_xs()
+                                            .child(format!(
+                                                "{} {} {} {}",
+                                                s.protocol.as_str(),
+                                                s.local,
+                                                s.remote
+                                                    .map(|r| r.to_string())
+                                                    .unwrap_or_else(|| "-".into()),
+                                                s.state.as_str()
+                                            ))
+                                            .into_any_element()
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .px_2()
+                            .py_1()
+                            .border_l_1()
+                            .border_color(theme::BORDER_SUBTLE)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::TEXT_MUTED)
+                                    .child(if pf.busy {
+                                        "文件句柄加载中…".to_string()
+                                    } else if pf.pid == Some(pid) {
+                                        format!("打开文件（{}）", pf.files.len())
+                                    } else {
+                                        "打开文件".into()
+                                    }),
+                            )
+                            .when_some(pf.error.clone(), |el, e| {
+                                el.child(div().text_xs().text_color(theme::DANGER).child(e))
+                            })
+                            .child(
+                                div()
+                                    .id("detail-files")
+                                    .flex_1()
+                                    .overflow_y_scroll()
+                                    .children(
+                                        pf.files
+                                            .into_iter()
+                                            .filter(|_| pf.pid == Some(pid))
+                                            .map(|f| {
+                                                div()
+                                                    .py_1()
+                                                    .text_xs()
+                                                    .child(f.path)
+                                                    .into_any_element()
+                                            }),
+                                    ),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -1085,7 +1500,6 @@ impl WorkspaceView {
         let field = match self.active_field {
             ActiveField::Process => &mut self.process_query,
             ActiveField::Port => &mut self.port_query,
-            ActiveField::PortProc => &mut self.port_proc_query,
             ActiveField::File => &mut self.file_query,
             ActiveField::Dns => &mut self.dns_query,
         };
@@ -1096,7 +1510,6 @@ impl WorkspaceView {
         let field = match self.active_field {
             ActiveField::Process => &mut self.process_query,
             ActiveField::Port => &mut self.port_query,
-            ActiveField::PortProc => &mut self.port_proc_query,
             ActiveField::File => &mut self.file_query,
             ActiveField::Dns => &mut self.dns_query,
         };
@@ -1107,7 +1520,6 @@ impl WorkspaceView {
         let field = match self.active_field {
             ActiveField::Process => &mut self.process_query,
             ActiveField::Port => &mut self.port_query,
-            ActiveField::PortProc => &mut self.port_proc_query,
             ActiveField::File => &mut self.file_query,
             ActiveField::Dns => &mut self.dns_query,
         };
@@ -1127,12 +1539,15 @@ impl Render for WorkspaceView {
             MainPane::Files => self.render_file_pane(cx).into_any_element(),
             MainPane::Dns => self.render_dns_pane(cx).into_any_element(),
             MainPane::Proxy => self.render_proxy_pane(cx).into_any_element(),
+            MainPane::Settings => self.render_settings_pane(cx).into_any_element(),
         };
 
-        let show_detail = matches!(
-            self.pane,
-            MainPane::Processes | MainPane::Ports | MainPane::Files
-        );
+        let show_detail = self.detail_open
+            && self.selected_pid.is_some()
+            && matches!(
+                self.pane,
+                MainPane::Processes | MainPane::Ports | MainPane::Files
+            );
 
         div()
             .track_focus(&self.focus)
@@ -1174,13 +1589,29 @@ impl Render for WorkspaceView {
                 this.store.update(cx, |s, cx| s.refresh_proxy_health(cx));
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ShowSettings, _, cx| {
+                this.pane = MainPane::Settings;
+                cx.notify();
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "enter" {
+                    if this.pane == MainPane::Files {
+                        let q = this.file_query.clone();
+                        this.store.update(cx, |s, cx| s.search_path_holders(q, cx));
+                    }
+                    return;
+                }
                 if event.keystroke.key == "backspace" {
                     this.backspace_active();
                     cx.notify();
                     return;
                 }
                 if event.keystroke.key == "escape" {
+                    if this.detail_open {
+                        this.detail_open = false;
+                        cx.notify();
+                        return;
+                    }
                     this.clear_active();
                     cx.notify();
                     return;
@@ -1194,31 +1625,33 @@ impl Render for WorkspaceView {
             }))
             .size_full()
             .flex()
-            .flex_col()
+            .flex_row()
             .bg(theme::BG)
             .text_color(theme::TEXT)
             .font_family(theme::FONT_UI)
-            .child(self.render_toolbar(cx))
+            .child(self.render_sidebar(cx))
             .child(
                 div()
-                    .flex()
-                    .flex_row()
                     .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_col()
                     .overflow_hidden()
-                    .child(div().flex_1().h_full().child(main))
-                    .when(show_detail, |el| el.child(self.render_detail(cx))),
+                    .child(div().flex_1().overflow_hidden().child(main))
+                    .when(show_detail, |el| el.child(self.render_detail(cx)))
+                    .child(self.render_status_bar(cx)),
             )
             .child(self.render_modals(cx))
     }
 }
 
-fn nav_chip(
+fn nav_item(
     this: &WorkspaceView,
     label: &'static str,
     pane: MainPane,
     cx: &mut Context<WorkspaceView>,
-) -> ChipButton {
-    ChipButton::new(
+) -> NavItem {
+    NavItem::new(
         ElementId::Name(format!("nav-{label}").into()),
         label,
         this.pane == pane,
@@ -1230,6 +1663,7 @@ fn nav_chip(
                 MainPane::Files => ActiveField::File,
                 MainPane::Dns => ActiveField::Dns,
                 MainPane::Proxy => ActiveField::Process,
+                MainPane::Settings => ActiveField::Process,
             };
             if pane == MainPane::Dns {
                 this.store.update(cx, |s, cx| s.refresh_dns(cx));
@@ -1283,17 +1717,19 @@ fn search_box(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .flex_1()
+        .w(px(280.))
+        .h(px(28.))
         .px_2()
-        .py_1()
         .rounded(px(theme::RADIUS_SM))
-        .bg(theme::ELEVATED)
+        .bg(theme::PANEL_BG)
         .border_1()
         .border_color(if active {
             theme::ACCENT
         } else {
             theme::BORDER
         })
+        .flex()
+        .items_center()
         .text_sm()
         .text_color(if value.is_empty() {
             theme::TEXT_MUTED
@@ -1309,6 +1745,55 @@ fn search_box(
         .on_click(on_click)
 }
 
+fn process_table_header() -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(28.))
+        .w_full()
+        .px_3()
+        .gap_2()
+        .border_b_1()
+        .border_color(theme::BORDER)
+        .bg(theme::SIDEBAR_BG)
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::TEXT_MUTED)
+        .child(div().w(px(theme::COL_TREE)))
+        .child(
+            div()
+                .w(px(theme::COL_NAME))
+                .min_w(px(theme::COL_NAME))
+                .child("名称"),
+        )
+        .child(
+            div()
+                .w(px(theme::COL_PID))
+                .min_w(px(theme::COL_PID))
+                .flex()
+                .justify_end()
+                .child("PID"),
+        )
+        .child(
+            div()
+                .w(px(theme::COL_CPU))
+                .min_w(px(theme::COL_CPU))
+                .flex()
+                .justify_end()
+                .child("CPU"),
+        )
+        .child(
+            div()
+                .w(px(theme::COL_MEM))
+                .min_w(px(theme::COL_MEM))
+                .flex()
+                .justify_end()
+                .child("内存"),
+        )
+        .child(div().flex_1().child("路径"))
+}
+
 fn col_header(cols: &[(&str, f32)]) -> impl IntoElement {
     let owned: Vec<(String, f32)> = cols
         .iter()
@@ -1317,12 +1802,15 @@ fn col_header(cols: &[(&str, f32)]) -> impl IntoElement {
     let mut row = div()
         .flex()
         .flex_row()
+        .items_center()
+        .h(px(28.))
         .px_3()
-        .py_1()
-        .gap_3()
+        .gap_2()
         .border_b_1()
         .border_color(theme::BORDER)
+        .bg(theme::SIDEBAR_BG)
         .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme::TEXT_MUTED);
     for (label, w) in owned {
         let cell = if w > 0.0 {
@@ -1370,16 +1858,17 @@ fn modal_shell(
             h: 0.0,
             s: 0.0,
             l: 0.0,
-            a: 0.45,
+            a: 0.35,
         })
         .child(
             div()
                 .w(px(400.))
                 .p_4()
-                .rounded(px(8.))
-                .bg(theme::ELEVATED)
+                .rounded(px(theme::RADIUS_MD))
+                .bg(theme::PANEL_BG)
                 .border_1()
                 .border_color(theme::BORDER)
+                .shadow_md()
                 .flex()
                 .flex_col()
                 .gap_3()

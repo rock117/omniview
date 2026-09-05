@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+/// Top-level app settings (extensible). Persist as JSON under config dir.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppSettings {
+    pub refresh: RefreshSettings,
+    // Future: theme, columns, proxy ports, …
+}
+
 /// Auto-refresh policy shared across views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshSettings {
@@ -29,6 +36,9 @@ impl RefreshSettings {
     }
 }
 
+/// Preset intervals shown in Settings UI.
+pub const REFRESH_PRESETS_MS: &[u64] = &[500, 1000, 2000, 5000, 10_000];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MainPane {
     #[default]
@@ -37,6 +47,7 @@ pub enum MainPane {
     Files,
     Dns,
     Proxy,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

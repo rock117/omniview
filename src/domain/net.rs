@@ -118,3 +118,44 @@ pub fn filter_sockets<'a>(
         })
         .collect()
 }
+
+/// Single search box: port number, address fragment, or process name (OR).
+pub fn filter_sockets_unified<'a>(
+    sockets: &'a [SocketRow],
+    query: &str,
+    proto: Option<Protocol>,
+    process_name: impl Fn(u32) -> Option<String>,
+) -> Vec<&'a SocketRow> {
+    let q = query.trim();
+    if q.is_empty() {
+        return filter_sockets(sockets, "", "", proto, process_name);
+    }
+    let q_lower = q.to_lowercase();
+    let port_num: Option<u16> = q.parse().ok();
+    sockets
+        .iter()
+        .filter(|s| {
+            if let Some(p) = proto {
+                if s.protocol != p {
+                    return false;
+                }
+            }
+            let name = process_name(s.pid).unwrap_or_default().to_lowercase();
+            let local = s.local.to_string().to_lowercase();
+            let remote = s
+                .remote
+                .map(|r| r.to_string().to_lowercase())
+                .unwrap_or_default();
+            let pid_s = s.pid.to_string();
+            if let Some(p) = port_num {
+                if s.local_port() == p || s.remote.map(|r| r.port()) == Some(p) {
+                    return true;
+                }
+            }
+            name.contains(&q_lower)
+                || pid_s.contains(&q_lower)
+                || local.contains(&q_lower)
+                || remote.contains(&q_lower)
+        })
+        .collect()
+}

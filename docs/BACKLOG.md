@@ -9,7 +9,7 @@
 - [x] 进程详情网络列表
 - [x] DNS 缓存：查看 / 搜索 / 清空 / 单条删除（Windows）
 - [x] 代理排障：系统代理、WinHTTP、环境变量、本地代理端口、体检标色、快捷修复
-- [ ] 文件占用 HandleProbe（Windows 句柄枚举）
+- [x] 文件占用 HandleProbe（Windows 句柄枚举 + 文件页 + 详情加载）
 
 ## P1
 

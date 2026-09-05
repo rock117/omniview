@@ -5,16 +5,20 @@ use gpui::*;
 
 use crate::collect::{collect_snapshot, SystemSnapshot};
 use crate::domain::{
-    build_proxy_findings, DnsCacheSnapshot, Pid, ProxyHealthSnapshot, RefreshSettings, SocketState,
+    build_proxy_findings, AppSettings, DnsCacheSnapshot, FileSearchSnapshot, Pid,
+    ProcessFilesSnapshot, ProxyHealthSnapshot, RefreshSettings, SocketState,
 };
 use crate::platform::PlatformServices;
+use crate::shared::persist;
 
 pub struct SnapshotStore {
     pub services: PlatformServices,
     pub snapshot: Arc<SystemSnapshot>,
     pub dns: DnsCacheSnapshot,
     pub proxy: ProxyHealthSnapshot,
-    pub refresh: RefreshSettings,
+    pub file_search: FileSearchSnapshot,
+    pub process_files: ProcessFilesSnapshot,
+    pub settings: AppSettings,
     pub busy: bool,
     pub last_error: Option<String>,
     pub kill_confirm: Option<KillConfirm>,
@@ -56,7 +60,9 @@ impl SnapshotStore {
                 ..Default::default()
             },
             proxy: ProxyHealthSnapshot::default(),
-            refresh: RefreshSettings::default(),
+            file_search: FileSearchSnapshot::default(),
+            process_files: ProcessFilesSnapshot::default(),
+            settings: persist::load_settings(),
             busy: false,
             last_error: None,
             kill_confirm: None,
@@ -69,15 +75,23 @@ impl SnapshotStore {
     }
 
     pub fn set_auto(&mut self, auto: bool, cx: &mut Context<Self>) {
-        self.refresh.auto = auto;
+        self.settings.refresh.auto = auto;
+        self.persist_settings();
         self.arm_timer(cx);
         cx.notify();
     }
 
     pub fn set_interval_ms(&mut self, ms: u64, cx: &mut Context<Self>) {
-        self.refresh.interval_ms = RefreshSettings::clamp_interval(ms);
+        self.settings.refresh.interval_ms = RefreshSettings::clamp_interval(ms);
+        self.persist_settings();
         self.arm_timer(cx);
         cx.notify();
+    }
+
+    fn persist_settings(&self) {
+        if let Err(e) = persist::save_settings(&self.settings) {
+            eprintln!("omniview: save settings failed: {e}");
+        }
     }
 
     pub fn request_refresh(&mut self, cx: &mut Context<Self>) {
@@ -223,6 +237,87 @@ impl SnapshotStore {
         .detach();
     }
 
+    pub fn search_path_holders(&mut self, path: String, cx: &mut Context<Self>) {
+        let path = path.trim().to_string();
+        if path.is_empty() {
+            self.file_search.error = Some("请输入文件或目录路径".into());
+            cx.notify();
+            return;
+        }
+        if self.file_search.busy {
+            return;
+        }
+        self.file_search.busy = true;
+        self.file_search.query = path.clone();
+        self.file_search.error = None;
+        self.file_search.holders.clear();
+        cx.notify();
+
+        let services = self.services.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    services
+                        .handles
+                        .holders_of_path(std::path::Path::new(&path))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.file_search.busy = false;
+                match result {
+                    Ok(holders) => {
+                        this.file_search.holders = holders;
+                        this.file_search.error = None;
+                    }
+                    Err(e) => {
+                        this.file_search.holders.clear();
+                        this.file_search.error = Some(e.to_string());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn load_process_files(&mut self, pid: Pid, cx: &mut Context<Self>) {
+        if self.process_files.busy && self.process_files.pid == Some(pid) {
+            return;
+        }
+        self.process_files.busy = true;
+        self.process_files.pid = Some(pid);
+        self.process_files.error = None;
+        self.process_files.files.clear();
+        cx.notify();
+
+        let services = self.services.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { services.handles.open_files(pid) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.process_files.pid != Some(pid) {
+                    return;
+                }
+                this.process_files.busy = false;
+                match result {
+                    Ok(files) => {
+                        this.process_files.files = files;
+                        this.process_files.error = None;
+                    }
+                    Err(e) => {
+                        this.process_files.files.clear();
+                        this.process_files.error = Some(e.to_string());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn ask_kill(&mut self, pid: Pid, name: String, tree: bool, cx: &mut Context<Self>) {
         self.kill_confirm = Some(KillConfirm { pid, name, tree });
         cx.notify();
@@ -310,15 +405,15 @@ impl SnapshotStore {
 
     fn arm_timer(&mut self, cx: &mut Context<Self>) {
         self.timer_generation = self.timer_generation.wrapping_add(1);
-        if !self.refresh.auto {
+        if !self.settings.refresh.auto {
             return;
         }
         let generation = self.timer_generation;
-        let interval = Duration::from_millis(self.refresh.interval_ms);
+        let interval = Duration::from_millis(self.settings.refresh.interval_ms);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(interval).await;
             this.update(cx, |this, cx| {
-                if this.timer_generation != generation || !this.refresh.auto {
+                if this.timer_generation != generation || !this.settings.refresh.auto {
                     return;
                 }
                 this.request_refresh(cx);

@@ -9,6 +9,7 @@ actions!(
         ShowFiles,
         ShowDns,
         ShowProxy,
+        ShowSettings,
         QuitApp,
     ]
 );

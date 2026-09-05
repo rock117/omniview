@@ -14,6 +14,7 @@ pub fn run() {
             KeyBinding::new("ctrl-3", ShowFiles, Some("Omniview")),
             KeyBinding::new("ctrl-4", ShowDns, Some("Omniview")),
             KeyBinding::new("ctrl-5", ShowProxy, Some("Omniview")),
+            KeyBinding::new("ctrl-,", ShowSettings, Some("Omniview")),
             KeyBinding::new("ctrl-q", QuitApp, Some("Omniview")),
         ]);
 

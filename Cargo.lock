@@ -3550,6 +3550,7 @@ dependencies = [
  "embed-resource",
  "flume 0.12.0",
  "gpui",
+ "rust-embed",
  "serde",
  "serde_json",
  "sysinfo 0.34.2",
@@ -4398,6 +4399,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rust-embed-utils",
+ "shellexpand",
  "syn 2.0.119",
  "walkdir",
 ]
@@ -4827,6 +4829,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "shellexpand"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
+dependencies = [
+ "dirs 4.0.0",
 ]
 
 [[package]]

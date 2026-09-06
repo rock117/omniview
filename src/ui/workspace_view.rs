@@ -625,11 +625,26 @@ impl WorkspaceView {
                     .child(if has_kids {
                         div()
                             .id(ElementId::Name(format!("exp-{pid}").into()))
-                            .text_xs()
-                            .text_color(theme::TEXT_MUTED)
+                            .size(px(theme::COL_TREE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(theme::RADIUS_SM))
                             .cursor_pointer()
-                            .child(if expanded { "▼" } else { "▶" })
+                            .hover(|s| s.bg(theme::HOVER))
+                            .child(
+                                svg()
+                                    .path(if expanded {
+                                        "icons/ui/chevron-down.svg"
+                                    } else {
+                                        "icons/ui/chevron-right.svg"
+                                    })
+                                    .size(px(14.))
+                                    .text_color(theme::TEXT_MUTED)
+                                    .flex_shrink_0(),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 if !this.expanded.insert(pid) {
                                     this.expanded.remove(&pid);
                                 }

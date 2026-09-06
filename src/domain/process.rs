@@ -64,18 +64,7 @@ pub fn filter_processes<'a>(
         return list.iter().collect();
     }
     list.iter()
-        .filter(|p| {
-            p.name.to_lowercase().contains(&q)
-                || p.pid.to_string().contains(&q)
-                || p.exe_path
-                    .as_deref()
-                    .map(|s| s.to_lowercase().contains(&q))
-                    .unwrap_or(false)
-                || p.cmd_line
-                    .as_deref()
-                    .map(|s| s.to_lowercase().contains(&q))
-                    .unwrap_or(false)
-        })
+        .filter(|p| p.name.to_lowercase().contains(&q))
         .collect()
 }
 

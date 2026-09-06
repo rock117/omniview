@@ -379,7 +379,7 @@ impl WorkspaceView {
             .child(text_input_box(
                 "proc-q",
                 &self.process_query,
-                "搜索名称、PID 或路径",
+                "搜索进程名",
                 self.active_field == ActiveField::Process,
                 px(280.),
                 ActiveField::Process,

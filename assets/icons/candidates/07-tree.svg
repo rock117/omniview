@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Tree">
+  <rect width="128" height="128" rx="28" fill="#F8FAFC"/>
+  <circle cx="64" cy="28" r="10" fill="#0078D4"/>
+  <path d="M64 38 V58 M64 58 H40 V70 M64 58 H88 V70" fill="none" stroke="#94A3B8" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="40" cy="82" r="9" fill="#00A4EF"/>
+  <circle cx="88" cy="82" r="9" fill="#38BDF8"/>
+  <path d="M40 91 V100 M88 91 V100" fill="none" stroke="#CBD5E1" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="40" cy="108" r="6" fill="#94A3B8"/>
+  <circle cx="88" cy="108" r="6" fill="#94A3B8"/>
+</svg>

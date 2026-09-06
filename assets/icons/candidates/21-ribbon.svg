@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Ribbon">
+  <rect width="128" height="128" rx="28" fill="#0078D4"/>
+  <path d="M24 40 C48 20 80 20 104 40 L104 56 C80 36 48 36 24 56 Z" fill="#FFFFFF" opacity="0.95"/>
+  <path d="M24 58 C48 38 80 38 104 58 L104 74 C80 54 48 54 24 74 Z" fill="#FFFFFF" opacity="0.6"/>
+  <path d="M24 76 C48 56 80 56 104 76 L104 92 C80 72 48 72 24 92 Z" fill="#FFFFFF" opacity="0.35"/>
+</svg>

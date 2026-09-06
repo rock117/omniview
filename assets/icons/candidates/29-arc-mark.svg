@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Arc Mark">
+  <rect width="128" height="128" rx="28" fill="#0078D4"/>
+  <path d="M28 88 A44 44 0 0 1 100 40" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="100" cy="40" r="8" fill="#FFFFFF"/>
+</svg>

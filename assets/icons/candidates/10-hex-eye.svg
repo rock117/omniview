@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Hex Eye">
+  <rect width="128" height="128" rx="28" fill="#0078D4"/>
+  <path d="M64 18 L104 40 V88 L64 110 L24 88 V40 Z" fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linejoin="round"/>
+  <circle cx="64" cy="64" r="18" fill="none" stroke="#FFFFFF" stroke-width="5"/>
+  <circle cx="64" cy="64" r="7" fill="#FFFFFF"/>
+</svg>

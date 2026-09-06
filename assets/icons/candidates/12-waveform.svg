@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Waveform">
+  <rect width="128" height="128" rx="28" fill="#0F172A"/>
+  <polyline fill="none" stroke="#38BDF8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"
+    points="18,72 34,48 48,80 64,36 80,70 96,52 110,64"/>
+  <line x1="18" y1="90" x2="110" y2="90" stroke="#334155" stroke-width="3"/>
+</svg>

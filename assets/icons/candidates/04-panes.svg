@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Panes">
+  <rect width="128" height="128" rx="28" fill="#0078D4"/>
+  <rect x="20" y="22" width="28" height="84" rx="6" fill="#FFFFFF" opacity="0.95"/>
+  <rect x="56" y="22" width="52" height="38" rx="6" fill="#FFFFFF" opacity="0.95"/>
+  <rect x="56" y="68" width="52" height="38" rx="6" fill="#FFFFFF" opacity="0.55"/>
+  <rect x="26" y="34" width="16" height="6" rx="2" fill="#0078D4"/>
+  <rect x="26" y="46" width="16" height="6" rx="2" fill="#0078D4" opacity="0.5"/>
+  <rect x="26" y="58" width="16" height="6" rx="2" fill="#0078D4" opacity="0.5"/>
+</svg>

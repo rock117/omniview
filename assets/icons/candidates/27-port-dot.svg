@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Port Dot">
+  <rect width="128" height="128" rx="28" fill="#0078D4"/>
+  <circle cx="40" cy="64" r="14" fill="#FFFFFF"/>
+  <circle cx="88" cy="64" r="14" fill="#FFFFFF" opacity="0.35"/>
+  <path d="M54 64 H74" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="88" cy="64" r="5" fill="#0078D4"/>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Meters">
+  <rect width="128" height="128" rx="28" fill="#F3F3F3"/>
+  <rect x="22" y="28" width="18" height="72" rx="5" fill="#CBD5E1"/>
+  <rect x="22" y="58" width="18" height="42" rx="5" fill="#0078D4"/>
+  <rect x="50" y="28" width="18" height="72" rx="5" fill="#CBD5E1"/>
+  <rect x="50" y="40" width="18" height="60" rx="5" fill="#00A4EF"/>
+  <rect x="78" y="28" width="18" height="72" rx="5" fill="#CBD5E1"/>
+  <rect x="78" y="72" width="18" height="28" rx="5" fill="#38BDF8"/>
+</svg>

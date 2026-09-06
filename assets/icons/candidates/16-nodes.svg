@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Nodes">
+  <rect width="128" height="128" rx="28" fill="#F3F3F3"/>
+  <line x1="40" y1="40" x2="88" y2="40" stroke="#94A3B8" stroke-width="4"/>
+  <line x1="40" y1="40" x2="40" y2="88" stroke="#94A3B8" stroke-width="4"/>
+  <line x1="40" y1="88" x2="88" y2="64" stroke="#94A3B8" stroke-width="4"/>
+  <line x1="88" y1="40" x2="88" y2="64" stroke="#94A3B8" stroke-width="4"/>
+  <circle cx="40" cy="40" r="10" fill="#0078D4"/>
+  <circle cx="88" cy="40" r="10" fill="#00A4EF"/>
+  <circle cx="40" cy="88" r="10" fill="#38BDF8"/>
+  <circle cx="88" cy="64" r="10" fill="#0EA5E9"/>
+</svg>

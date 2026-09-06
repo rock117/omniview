@@ -13,6 +13,8 @@
 cargo run
 ```
 
+Windows 窗口/任务栏图标来自 `assets/icons/omniview.ico`（候选 `02-radar`），由 `build.rs` 嵌入。改 SVG 后可运行 `python scripts/gen_icon.py` 重新生成 ICO。
+
 代理排障与 DNS 清空等写操作可能需要相应权限。
 
 ## 许可

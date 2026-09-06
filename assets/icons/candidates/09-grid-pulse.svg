@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Omniview Grid Pulse">
+  <rect width="128" height="128" rx="28" fill="#0F172A"/>
+  <rect x="24" y="24" width="28" height="28" rx="6" fill="#0078D4"/>
+  <rect x="60" y="24" width="28" height="28" rx="6" fill="#1E293B"/>
+  <rect x="96" y="24" width="8" height="28" rx="3" fill="#334155"/>
+  <rect x="24" y="60" width="28" height="28" rx="6" fill="#1E293B"/>
+  <rect x="60" y="60" width="28" height="28" rx="6" fill="#38BDF8"/>
+  <rect x="96" y="60" width="8" height="28" rx="3" fill="#334155"/>
+  <rect x="24" y="96" width="80" height="8" rx="3" fill="#334155"/>
+</svg>

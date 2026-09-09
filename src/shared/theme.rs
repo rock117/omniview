@@ -136,10 +136,17 @@ pub const FONT_UI: &str = "Segoe UI";
 
 /// Process table column widths (must match header + rows).
 pub const COL_TREE: f32 = 22.0;
+/// Defaults mirrored by `ProcessColumnWidths::default` (runtime widths are resizable).
+#[allow(dead_code)]
 pub const COL_NAME: f32 = 220.0;
+#[allow(dead_code)]
 pub const COL_PID: f32 = 72.0;
+#[allow(dead_code)]
 pub const COL_CPU: f32 = 80.0;
+#[allow(dead_code)]
 pub const COL_MEM: f32 = 96.0;
+#[allow(dead_code)]
+pub const COL_NET: f32 = 200.0;
 /// Path uses remaining flex space.
 
 /// Soft heat fill for CPU% (Task Manager style).

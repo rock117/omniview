@@ -159,3 +159,83 @@ pub fn filter_sockets_unified<'a>(
         })
         .collect()
 }
+
+/// Compact per-process network summaries for the process table.
+///
+/// Includes listen ports (TCP LISTEN + UDP binds) and ESTABLISHED remotes.
+/// Each summary keeps at most `max_parts` segments, then `+N` for the rest.
+pub fn process_net_summaries(
+    sockets: &[SocketRow],
+    max_parts: usize,
+) -> std::collections::HashMap<Pid, String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut listen: HashMap<Pid, Vec<u16>> = HashMap::new();
+    let mut est: HashMap<Pid, Vec<String>> = HashMap::new();
+    let mut listen_seen: HashMap<Pid, HashSet<u16>> = HashMap::new();
+    let mut est_seen: HashMap<Pid, HashSet<String>> = HashMap::new();
+
+    for s in sockets {
+        match s.state {
+            SocketState::Listen => {
+                let p = s.local_port();
+                if p == 0 {
+                    continue;
+                }
+                if listen_seen.entry(s.pid).or_default().insert(p) {
+                    listen.entry(s.pid).or_default().push(p);
+                }
+            }
+            SocketState::Established => {
+                let Some(remote) = s.remote else {
+                    continue;
+                };
+                if remote.port() == 0 {
+                    continue;
+                }
+                let part = format!("{}→{}", s.local_port(), remote);
+                if est_seen.entry(s.pid).or_default().insert(part.clone()) {
+                    est.entry(s.pid).or_default().push(part);
+                }
+            }
+            SocketState::Other if s.protocol == Protocol::Udp => {
+                let p = s.local_port();
+                if p == 0 {
+                    continue;
+                }
+                if listen_seen.entry(s.pid).or_default().insert(p) {
+                    listen.entry(s.pid).or_default().push(p);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut pids: HashSet<Pid> = listen.keys().copied().collect();
+    pids.extend(est.keys().copied());
+
+    let mut out = HashMap::with_capacity(pids.len());
+    for pid in pids {
+        let mut ports = listen.remove(&pid).unwrap_or_default();
+        ports.sort_unstable();
+        let mut conns = est.remove(&pid).unwrap_or_default();
+        conns.sort();
+        let mut parts: Vec<String> = ports
+            .into_iter()
+            .map(|p| p.to_string())
+            .chain(conns)
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let summary = if max_parts > 0 && parts.len() > max_parts {
+            let extra = parts.len() - max_parts;
+            parts.truncate(max_parts);
+            format!("{}  +{extra}", parts.join("  "))
+        } else {
+            parts.join("  ")
+        };
+        out.insert(pid, summary);
+    }
+    out
+}

@@ -88,6 +88,16 @@ impl SnapshotStore {
         cx.notify();
     }
 
+    pub fn set_process_columns(
+        &mut self,
+        cols: crate::domain::ProcessColumnWidths,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.process_columns = cols.clamp_all();
+        self.persist_settings();
+        cx.notify();
+    }
+
     fn persist_settings(&self) {
         if let Err(e) = persist::save_settings(&self.settings) {
             eprintln!("omniview: save settings failed: {e}");

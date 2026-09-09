@@ -13,7 +13,9 @@ pub fn load_settings() -> AppSettings {
     let Ok(bytes) = fs::read(&path) else {
         return AppSettings::default();
     };
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    let mut settings: AppSettings = serde_json::from_slice(&bytes).unwrap_or_default();
+    settings.process_columns = settings.process_columns.clamp_all();
+    settings
 }
 
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {

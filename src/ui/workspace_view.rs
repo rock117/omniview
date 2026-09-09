@@ -7,8 +7,9 @@ use gpui::*;
 use crate::collect::{PendingAction, SnapshotEvent, SnapshotStore, SystemSnapshot};
 use crate::domain::{
     children_map, filter_dns_entries, filter_processes, filter_sockets_unified, format_bytes,
-    is_common_proxy_port, sort_processes, HealthLevel, MainPane, Pid, ProcessInfo, ProcessSortKey,
-    ProcessViewMode, Protocol, SortDir, SocketState, REFRESH_PRESETS_MS,
+    is_common_proxy_port, process_net_summaries, sort_processes, HealthLevel, MainPane, Pid,
+    ProcessCol, ProcessColumnWidths, ProcessInfo, ProcessSortKey, ProcessViewMode, Protocol,
+    SortDir, SocketState, REFRESH_PRESETS_MS,
 };
 use crate::shared::actions::*;
 use crate::shared::theme;
@@ -31,6 +32,13 @@ enum DetailCopyTarget {
     OpenFile(usize),
 }
 
+#[derive(Clone, Copy)]
+struct ColResizeDrag {
+    col: ProcessCol,
+    start_x: f32,
+    start_w: f32,
+}
+
 pub struct WorkspaceView {
     store: Entity<SnapshotStore>,
     pane: MainPane,
@@ -48,6 +56,8 @@ pub struct WorkspaceView {
     detail_open: bool,
     detail_copy: Option<DetailCopyTarget>,
     detail_edit: TextEdit,
+    proc_cols: ProcessColumnWidths,
+    col_resize: Option<ColResizeDrag>,
     input_bounds: Option<Bounds<Pixels>>,
     input_selecting: bool,
     focus: FocusHandle,
@@ -59,6 +69,7 @@ impl WorkspaceView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let store = cx.new(SnapshotStore::new);
         let focus = cx.focus_handle();
+        let proc_cols = store.read(cx).settings.process_columns.clamp_all();
         let mut view = Self {
             store: store.clone(),
             pane: MainPane::Processes,
@@ -76,6 +87,8 @@ impl WorkspaceView {
             detail_open: false,
             detail_copy: None,
             detail_edit: TextEdit::default(),
+            proc_cols,
+            col_resize: None,
             input_bounds: None,
             input_selecting: false,
             focus,
@@ -405,12 +418,13 @@ impl WorkspaceView {
             ));
 
         let query = self.process_query.text.clone();
+        let net_by_pid = process_net_summaries(&snap.sockets, 3);
         let rows = match self.view_mode {
             ProcessViewMode::List => {
-                self.render_process_rows_flat(&filtered, mem_peak, &query, cx)
+                self.render_process_rows_flat(&filtered, mem_peak, &query, &net_by_pid, cx)
             }
             ProcessViewMode::Tree => {
-                self.render_process_rows_tree(&filtered, mem_peak, &query, cx)
+                self.render_process_rows_tree(&filtered, mem_peak, &query, &net_by_pid, cx)
             }
         };
 
@@ -445,6 +459,7 @@ impl WorkspaceView {
     fn process_table_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let sort_key = self.sort_key;
         let sort_dir = self.sort_dir;
+        let cols = self.proc_cols;
         div()
             .flex()
             .flex_row()
@@ -458,11 +473,11 @@ impl WorkspaceView {
             .bg(theme::SIDEBAR_BG)
             .text_xs()
             .font_weight(FontWeight::SEMIBOLD)
-            .child(div().w(px(theme::COL_TREE)))
+            .child(div().w(px(theme::COL_TREE)).border_r_1().border_color(theme::BORDER))
             .child(sortable_header_cell(
                 "hdr-name",
                 "名称",
-                theme::COL_NAME,
+                cols.name,
                 false,
                 sort_key == ProcessSortKey::Name,
                 sort_dir,
@@ -470,11 +485,14 @@ impl WorkspaceView {
                     this.toggle_process_sort(ProcessSortKey::Name);
                     cx.notify();
                 }),
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.begin_col_resize(ProcessCol::Name, event, cx);
+                }),
             ))
             .child(sortable_header_cell(
                 "hdr-pid",
                 "PID",
-                theme::COL_PID,
+                cols.pid,
                 true,
                 sort_key == ProcessSortKey::Pid,
                 sort_dir,
@@ -482,11 +500,14 @@ impl WorkspaceView {
                     this.toggle_process_sort(ProcessSortKey::Pid);
                     cx.notify();
                 }),
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.begin_col_resize(ProcessCol::Pid, event, cx);
+                }),
             ))
             .child(sortable_header_cell(
                 "hdr-cpu",
                 "CPU",
-                theme::COL_CPU,
+                cols.cpu,
                 true,
                 sort_key == ProcessSortKey::Cpu,
                 sort_dir,
@@ -494,11 +515,14 @@ impl WorkspaceView {
                     this.toggle_process_sort(ProcessSortKey::Cpu);
                     cx.notify();
                 }),
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.begin_col_resize(ProcessCol::Cpu, event, cx);
+                }),
             ))
             .child(sortable_header_cell(
                 "hdr-mem",
                 "内存",
-                theme::COL_MEM,
+                cols.mem,
                 true,
                 sort_key == ProcessSortKey::Memory,
                 sort_dir,
@@ -506,13 +530,59 @@ impl WorkspaceView {
                     this.toggle_process_sort(ProcessSortKey::Memory);
                     cx.notify();
                 }),
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.begin_col_resize(ProcessCol::Mem, event, cx);
+                }),
+            ))
+            .child(plain_header_cell(
+                "hdr-net",
+                "网络",
+                cols.net,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.begin_col_resize(ProcessCol::Net, event, cx);
+                }),
             ))
             .child(
                 div()
                     .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .pl_2()
                     .text_color(theme::TEXT_MUTED)
                     .child("路径"),
             )
+    }
+
+    fn begin_col_resize(&mut self, col: ProcessCol, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        let start_x: f32 = event.position.x.into();
+        self.col_resize = Some(ColResizeDrag {
+            col,
+            start_x,
+            start_w: self.proc_cols.get(col),
+        });
+        cx.notify();
+    }
+
+    fn update_col_resize(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(drag) = self.col_resize else {
+            return;
+        };
+        let x: f32 = event.position.x.into();
+        let dx = x - drag.start_x;
+        self.proc_cols.set(drag.col, drag.start_w + dx);
+        cx.notify();
+    }
+
+    fn end_col_resize(&mut self, cx: &mut Context<Self>) {
+        let Some(_) = self.col_resize.take() else {
+            return;
+        };
+        let cols = self.proc_cols;
+        self.store
+            .update(cx, |s, cx| s.set_process_columns(cols, cx));
+        cx.notify();
     }
 
     fn render_process_rows_flat(
@@ -520,6 +590,7 @@ impl WorkspaceView {
         list: &[ProcessInfo],
         mem_peak: u64,
         query: &str,
+        net_by_pid: &HashMap<Pid, String>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut out = Vec::with_capacity(list.len());
@@ -527,7 +598,7 @@ impl WorkspaceView {
             let has_expand = p.has_services();
             let open = self.expanded.contains(&p.pid) || self.show_process_services(p, query);
             out.push(
-                self.process_row(p, 0, has_expand, open, mem_peak, cx)
+                self.process_row(p, 0, has_expand, open, mem_peak, net_by_pid, cx)
                     .into_any_element(),
             );
             if has_expand && open {
@@ -547,6 +618,7 @@ impl WorkspaceView {
         list: &[ProcessInfo],
         mem_peak: u64,
         query: &str,
+        net_by_pid: &HashMap<Pid, String>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let by_pid: HashMap<Pid, ProcessInfo> =
@@ -567,7 +639,17 @@ impl WorkspaceView {
         }
         let mut out = Vec::new();
         for root in roots {
-            self.walk_tree(root, 0, &by_pid, &kids, mem_peak, query, &mut out, cx);
+            self.walk_tree(
+                root,
+                0,
+                &by_pid,
+                &kids,
+                mem_peak,
+                query,
+                net_by_pid,
+                &mut out,
+                cx,
+            );
         }
         out
     }
@@ -597,6 +679,7 @@ impl WorkspaceView {
         kids: &HashMap<Pid, Vec<Pid>>,
         mem_peak: u64,
         query: &str,
+        net_by_pid: &HashMap<Pid, String>,
         out: &mut Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) {
@@ -608,7 +691,7 @@ impl WorkspaceView {
         let show_services = self.show_process_services(proc_, query);
         let open = self.expanded.contains(&pid) || show_services;
         out.push(
-            self.process_row(proc_, depth, has_expand, open, mem_peak, cx)
+            self.process_row(proc_, depth, has_expand, open, mem_peak, net_by_pid, cx)
                 .into_any_element(),
         );
         if open {
@@ -631,6 +714,7 @@ impl WorkspaceView {
                             kids,
                             mem_peak,
                             query,
+                            net_by_pid,
                             out,
                             cx,
                         );
@@ -652,6 +736,7 @@ impl WorkspaceView {
         let label = svc.label().to_string();
         let key = svc.name.clone();
         let row_id = format!("svc-{parent_pid}-{key}");
+        let cols = self.proc_cols;
 
         div()
             .id(ElementId::Name(row_id.into()))
@@ -674,9 +759,9 @@ impl WorkspaceView {
             .child(div().w(px(theme::COL_TREE)))
             .child(
                 div()
-                    .w(px(theme::COL_NAME))
-                    .min_w(px(theme::COL_NAME))
-                    .max_w(px(theme::COL_NAME))
+                    .w(px(cols.name))
+                    .min_w(px(cols.name))
+                    .max_w(px(cols.name))
                     .pl(indent)
                     .overflow_hidden()
                     .flex()
@@ -699,21 +784,10 @@ impl WorkspaceView {
                             .child(label),
                     ),
             )
-            .child(
-                div()
-                    .w(px(theme::COL_PID))
-                    .min_w(px(theme::COL_PID)),
-            )
-            .child(
-                div()
-                    .w(px(theme::COL_CPU))
-                    .min_w(px(theme::COL_CPU)),
-            )
-            .child(
-                div()
-                    .w(px(theme::COL_MEM))
-                    .min_w(px(theme::COL_MEM)),
-            )
+            .child(div().w(px(cols.pid)).min_w(px(cols.pid)))
+            .child(div().w(px(cols.cpu)).min_w(px(cols.cpu)))
+            .child(div().w(px(cols.mem)).min_w(px(cols.mem)))
+            .child(div().w(px(cols.net)).min_w(px(cols.net)))
             .child(
                 div()
                     .flex_1()
@@ -743,6 +817,7 @@ impl WorkspaceView {
         has_kids: bool,
         expanded: bool,
         mem_peak: u64,
+        net_by_pid: &HashMap<Pid, String>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.selected_pid == Some(p.pid);
@@ -752,6 +827,8 @@ impl WorkspaceView {
         let cpu_bg = theme::cpu_heat(p.cpu_percent);
         let mem_bg = theme::mem_heat(p.memory_bytes, mem_peak);
         let path = p.exe_path.clone().unwrap_or_default();
+        let net = net_by_pid.get(&pid).cloned().unwrap_or_default();
+        let cols = self.proc_cols;
 
         div()
             .id(ElementId::Name(format!("proc-{pid}").into()))
@@ -814,9 +891,9 @@ impl WorkspaceView {
             // Name — fixed width; tree indent only inside this cell.
             .child(
                 div()
-                    .w(px(theme::COL_NAME))
-                    .min_w(px(theme::COL_NAME))
-                    .max_w(px(theme::COL_NAME))
+                    .w(px(cols.name))
+                    .min_w(px(cols.name))
+                    .max_w(px(cols.name))
                     .pl(indent)
                     .overflow_hidden()
                     .text_sm()
@@ -826,8 +903,8 @@ impl WorkspaceView {
             )
             .child(
                 div()
-                    .w(px(theme::COL_PID))
-                    .min_w(px(theme::COL_PID))
+                    .w(px(cols.pid))
+                    .min_w(px(cols.pid))
                     .flex()
                     .justify_end()
                     .text_sm()
@@ -837,8 +914,8 @@ impl WorkspaceView {
             )
             .child(
                 div()
-                    .w(px(theme::COL_CPU))
-                    .min_w(px(theme::COL_CPU))
+                    .w(px(cols.cpu))
+                    .min_w(px(cols.cpu))
                     .h(px(22.))
                     .px_1()
                     .rounded(px(2.))
@@ -852,8 +929,8 @@ impl WorkspaceView {
             )
             .child(
                 div()
-                    .w(px(theme::COL_MEM))
-                    .min_w(px(theme::COL_MEM))
+                    .w(px(cols.mem))
+                    .min_w(px(cols.mem))
                     .h(px(22.))
                     .px_1()
                     .rounded(px(2.))
@@ -864,6 +941,18 @@ impl WorkspaceView {
                     .text_sm()
                     .font_family("Consolas")
                     .child(format_bytes(p.memory_bytes)),
+            )
+            .child(
+                div()
+                    .w(px(cols.net))
+                    .min_w(px(cols.net))
+                    .max_w(px(cols.net))
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(theme::TEXT_MUTED)
+                    .font_family("Consolas")
+                    .whitespace_nowrap()
+                    .child(net),
             )
             .child(
                 div()
@@ -2204,6 +2293,10 @@ impl Render for WorkspaceView {
             )
             .child(self.render_modals(cx))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if this.col_resize.is_some() {
+                    this.update_col_resize(event, cx);
+                    return;
+                }
                 if !this.input_selecting || this.detail_copy.is_some() {
                     return;
                 }
@@ -2215,6 +2308,9 @@ impl Render for WorkspaceView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    if this.col_resize.is_some() {
+                        this.end_col_resize(cx);
+                    }
                     if this.input_selecting {
                         this.input_selecting = false;
                         cx.notify();
@@ -2503,6 +2599,7 @@ fn sortable_header_cell(
     active: bool,
     dir: SortDir,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_resize_start: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let mark = if active {
         match dir {
@@ -2512,13 +2609,15 @@ fn sortable_header_cell(
     } else {
         ""
     };
-    let mut cell = div()
+    let id = id.into();
+    let resize_id = ElementId::Name(format!("{id:?}-rz").into());
+    let mut label_row = div()
         .id(id)
-        .w(px(width))
-        .min_w(px(width))
+        .flex_1()
         .h_full()
         .flex()
         .items_center()
+        .pr_1()
         .cursor_pointer()
         .hover(|s| s.text_color(theme::TEXT))
         .text_color(if active {
@@ -2529,9 +2628,70 @@ fn sortable_header_cell(
         .child(format!("{label}{mark}"))
         .on_click(on_click);
     if end_align {
-        cell = cell.justify_end();
+        label_row = label_row.justify_end();
     }
-    cell
+    div()
+        .w(px(width))
+        .min_w(px(width))
+        .h_full()
+        .relative()
+        .border_r_1()
+        .border_color(theme::BORDER)
+        .child(label_row)
+        .child(col_resize_handle(resize_id, on_resize_start))
+}
+
+fn plain_header_cell(
+    id: impl Into<ElementId>,
+    label: &str,
+    width: f32,
+    on_resize_start: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let id = id.into();
+    let resize_id = ElementId::Name(format!("{id:?}-rz").into());
+    div()
+        .w(px(width))
+        .min_w(px(width))
+        .h_full()
+        .relative()
+        .border_r_1()
+        .border_color(theme::BORDER)
+        .text_color(theme::TEXT_MUTED)
+        .child(
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .pr_1()
+                .child(label.to_string()),
+        )
+        .child(col_resize_handle(resize_id, on_resize_start))
+}
+
+fn col_resize_handle(
+    id: impl Into<ElementId>,
+    on_resize_start: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .absolute()
+        .top_0()
+        .right(px(-4.))
+        .w(px(8.))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(CursorStyle::ResizeColumn)
+        .child(
+            div()
+                .w(px(1.))
+                .h(px(16.))
+                .bg(theme::BORDER)
+                .rounded(px(1.)),
+        )
+        .hover(|s| s.bg(theme::ACCENT.opacity(0.2)))
+        .on_mouse_down(MouseButton::Left, on_resize_start)
 }
 
 fn col_header(cols: &[(&str, f32)]) -> impl IntoElement {

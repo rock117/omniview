@@ -4,7 +4,12 @@ use crate::domain::Pid;
 pub struct ProcessInfo {
     pub pid: Pid,
     pub parent_pid: Option<Pid>,
+    /// Image / executable base name (e.g. `MsMpEng.exe`).
     pub name: String,
+    /// Friendly name from PE `FileDescription` (Task Manager style), when available.
+    pub display_name: Option<String>,
+    /// Windows service display names hosted by this PID (may be empty / shared svchost).
+    pub service_names: Vec<String>,
     pub exe_path: Option<String>,
     pub cmd_line: Option<String>,
     pub user: Option<String>,
@@ -12,6 +17,17 @@ pub struct ProcessInfo {
     pub cpu_percent: f32,
     /// Resident / working-set style memory in bytes.
     pub memory_bytes: u64,
+}
+
+impl ProcessInfo {
+    /// UI label: display name when present, otherwise image name.
+    pub fn label(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.name.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +57,10 @@ pub fn sort_processes(list: &mut [ProcessInfo], key: ProcessSortKey, dir: SortDi
     list.sort_by(|a, b| {
         let ord = match key {
             ProcessSortKey::Pid => a.pid.cmp(&b.pid),
-            ProcessSortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            ProcessSortKey::Name => a
+                .label()
+                .to_lowercase()
+                .cmp(&b.label().to_lowercase()),
             ProcessSortKey::Cpu => a
                 .cpu_percent
                 .partial_cmp(&b.cpu_percent)
@@ -64,7 +83,15 @@ pub fn filter_processes<'a>(
         return list.iter().collect();
     }
     list.iter()
-        .filter(|p| p.name.to_lowercase().contains(&q))
+        .filter(|p| {
+            p.name.to_lowercase().contains(&q)
+                || p.display_name
+                    .as_ref()
+                    .is_some_and(|d| d.to_lowercase().contains(&q))
+                || p.service_names
+                    .iter()
+                    .any(|s| s.to_lowercase().contains(&q))
+        })
         .collect()
 }
 

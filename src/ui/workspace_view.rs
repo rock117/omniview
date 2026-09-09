@@ -379,7 +379,7 @@ impl WorkspaceView {
             .child(text_input_box(
                 "proc-q",
                 &self.process_query,
-                "搜索进程名",
+                "搜索进程名/显示名",
                 self.active_field == ActiveField::Process,
                 px(280.),
                 ActiveField::Process,
@@ -590,7 +590,7 @@ impl WorkspaceView {
     ) -> impl IntoElement {
         let selected = self.selected_pid == Some(p.pid);
         let pid = p.pid;
-        let name = p.name.clone();
+        let name = p.label().to_string();
         let expanded = self.expanded.contains(&pid);
         let indent = px(14.0 * depth as f32);
         let cpu_bg = theme::cpu_heat(p.cpu_percent);
@@ -748,13 +748,33 @@ impl WorkspaceView {
         let name_by_pid: HashMap<Pid, String> = snap
             .processes
             .iter()
-            .map(|p| (p.pid, p.name.clone()))
+            .map(|p| (p.pid, p.label().to_string()))
+            .collect();
+        let search_by_pid: HashMap<Pid, String> = snap
+            .processes
+            .iter()
+            .map(|p| {
+                let mut s = p.name.clone();
+                if let Some(d) = &p.display_name {
+                    if !d.is_empty() && !s.eq_ignore_ascii_case(d) {
+                        s.push(' ');
+                        s.push_str(d);
+                    }
+                }
+                for svc in &p.service_names {
+                    if !svc.is_empty() && !s.to_lowercase().contains(&svc.to_lowercase()) {
+                        s.push(' ');
+                        s.push_str(svc);
+                    }
+                }
+                (p.pid, s)
+            })
             .collect();
         let filtered = filter_sockets_unified(
             &snap.sockets,
             &self.port_query.text,
             self.port_proto,
-            |pid| name_by_pid.get(&pid).cloned(),
+            |pid| search_by_pid.get(&pid).cloned(),
         );
 
         let tools = div()
@@ -916,7 +936,7 @@ impl WorkspaceView {
             .snapshot(cx)
             .processes
             .iter()
-            .map(|p| (p.pid, p.name.clone()))
+            .map(|p| (p.pid, p.label().to_string()))
             .collect();
 
         let tools = div()
@@ -1470,7 +1490,7 @@ impl WorkspaceView {
         let store2 = self.store.clone();
         let store3 = self.store.clone();
         let name = proc_
-            .map(|p| p.name.clone())
+            .map(|p| p.label().to_string())
             .unwrap_or_else(|| "?".into());
 
         div()
@@ -1576,6 +1596,19 @@ impl WorkspaceView {
                                             "内存  {}",
                                             format_bytes(p.memory_bytes)
                                         ))
+                                        .when(
+                                            p.display_name.as_ref().is_some_and(|d| {
+                                                !d.is_empty() && !d.eq_ignore_ascii_case(&p.name)
+                                            }),
+                                            |el| {
+                                                el.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme::TEXT_MUTED)
+                                                        .child(format!("映像名  {}", p.name)),
+                                                )
+                                            },
+                                        )
                                         .child(copyable_detail_row(
                                             "detail-parent",
                                             "父 PID",
@@ -2434,7 +2467,10 @@ fn cmp_proc(
                 .partial_cmp(&b.cpu_percent)
                 .unwrap_or(std::cmp::Ordering::Equal),
             ProcessSortKey::Memory => a.memory_bytes.cmp(&b.memory_bytes),
-            ProcessSortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            ProcessSortKey::Name => a
+                .label()
+                .to_lowercase()
+                .cmp(&b.label().to_lowercase()),
             ProcessSortKey::Pid => a.pid.cmp(&b.pid),
         },
         _ => std::cmp::Ordering::Equal,

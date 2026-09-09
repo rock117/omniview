@@ -1,5 +1,25 @@
 use crate::domain::Pid;
 
+/// Windows service hosted by a process (SCM), Task Manager expand-row style.
+#[derive(Debug, Clone)]
+pub struct HostedService {
+    /// Service key name (e.g. `WinDefend`).
+    pub name: String,
+    /// Localized display name (e.g. `Microsoft Defender 防病毒服务`).
+    pub display_name: String,
+}
+
+impl HostedService {
+    pub fn label(&self) -> &str {
+        let d = self.display_name.trim();
+        if d.is_empty() {
+            self.name.as_str()
+        } else {
+            d
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: Pid,
@@ -8,8 +28,8 @@ pub struct ProcessInfo {
     pub name: String,
     /// Friendly name from PE `FileDescription` (Task Manager style), when available.
     pub display_name: Option<String>,
-    /// Windows service display names hosted by this PID (may be empty / shared svchost).
-    pub service_names: Vec<String>,
+    /// Windows services hosted by this PID (may be empty / shared svchost).
+    pub services: Vec<HostedService>,
     pub exe_path: Option<String>,
     pub cmd_line: Option<String>,
     pub user: Option<String>,
@@ -27,6 +47,10 @@ impl ProcessInfo {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(self.name.as_str())
+    }
+
+    pub fn has_services(&self) -> bool {
+        !self.services.is_empty()
     }
 }
 
@@ -88,9 +112,10 @@ pub fn filter_processes<'a>(
                 || p.display_name
                     .as_ref()
                     .is_some_and(|d| d.to_lowercase().contains(&q))
-                || p.service_names
-                    .iter()
-                    .any(|s| s.to_lowercase().contains(&q))
+                || p.services.iter().any(|s| {
+                    s.display_name.to_lowercase().contains(&q)
+                        || s.name.to_lowercase().contains(&q)
+                })
         })
         .collect()
 }

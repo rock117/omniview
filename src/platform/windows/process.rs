@@ -4,7 +4,7 @@ use std::sync::{LazyLock, Mutex};
 
 use sysinfo::{ProcessesToUpdate, System, UpdateKind};
 
-use crate::domain::{Pid, ProbeError, ProcessInfo};
+use crate::domain::{HostedService, Pid, ProbeError, ProcessInfo};
 use crate::platform::ProcessProbe;
 
 /// Process probe backed by `sysinfo` (portable core; used on Windows first).
@@ -87,11 +87,13 @@ impl ProcessProbe for SysinfoProcessProbe {
                     exe = resolve_exe_from_services(&name, svcs);
                 }
             }
-            let service_names: Vec<String> = svc_list
+            let services: Vec<HostedService> = svc_list
                 .map(|svcs| {
                     svcs.iter()
-                        .map(|s| s.display_name.clone())
-                        .filter(|d| !d.is_empty())
+                        .map(|s| HostedService {
+                            name: s.name.clone(),
+                            display_name: s.display_name.clone(),
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -100,7 +102,7 @@ impl ProcessProbe for SysinfoProcessProbe {
                 .and_then(cached_file_description)
                 .or_else(|| {
                     // Dedicated service process without PE description: use SCM name.
-                    (service_names.len() == 1).then(|| service_names[0].clone())
+                    (services.len() == 1).then(|| services[0].label().to_string())
                 });
             let user = proc_.user_id().map(|u| u.to_string());
             out.push(ProcessInfo {
@@ -108,7 +110,7 @@ impl ProcessProbe for SysinfoProcessProbe {
                 parent_pid: parent,
                 name,
                 display_name,
-                service_names,
+                services,
                 exe_path: exe,
                 cmd_line: cmd,
                 user,
@@ -461,7 +463,7 @@ mod tests {
         };
         eprintln!(
             "MsMpEng pid={} name={} display={:?} path={:?} services={:?}",
-            ms.pid, ms.name, ms.display_name, ms.exe_path, ms.service_names
+            ms.pid, ms.name, ms.display_name, ms.exe_path, ms.services
         );
         assert!(
             ms.display_name

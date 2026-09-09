@@ -404,9 +404,14 @@ impl WorkspaceView {
                 }),
             ));
 
+        let query = self.process_query.text.clone();
         let rows = match self.view_mode {
-            ProcessViewMode::List => self.render_process_rows_flat(&filtered, mem_peak, cx),
-            ProcessViewMode::Tree => self.render_process_rows_tree(&filtered, mem_peak, cx),
+            ProcessViewMode::List => {
+                self.render_process_rows_flat(&filtered, mem_peak, &query, cx)
+            }
+            ProcessViewMode::Tree => {
+                self.render_process_rows_tree(&filtered, mem_peak, &query, cx)
+            }
         };
 
         div()
@@ -514,20 +519,34 @@ impl WorkspaceView {
         &self,
         list: &[ProcessInfo],
         mem_peak: u64,
+        query: &str,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        list.iter()
-            .map(|p| {
-                self.process_row(p, 0, false, mem_peak, cx)
-                    .into_any_element()
-            })
-            .collect()
+        let mut out = Vec::with_capacity(list.len());
+        for p in list {
+            let has_expand = p.has_services();
+            let open = self.expanded.contains(&p.pid) || self.show_process_services(p, query);
+            out.push(
+                self.process_row(p, 0, has_expand, open, mem_peak, cx)
+                    .into_any_element(),
+            );
+            if has_expand && open {
+                for svc in &p.services {
+                    out.push(
+                        self.service_row(p.pid, svc, 1, cx)
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        out
     }
 
     fn render_process_rows_tree(
         &mut self,
         list: &[ProcessInfo],
         mem_peak: u64,
+        query: &str,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let by_pid: HashMap<Pid, ProcessInfo> =
@@ -548,9 +567,26 @@ impl WorkspaceView {
         }
         let mut out = Vec::new();
         for root in roots {
-            self.walk_tree(root, 0, &by_pid, &kids, mem_peak, &mut out, cx);
+            self.walk_tree(root, 0, &by_pid, &kids, mem_peak, query, &mut out, cx);
         }
         out
+    }
+
+    /// Show hosted services when expanded, or when search hits a service name.
+    fn show_process_services(&self, p: &ProcessInfo, query: &str) -> bool {
+        if !p.has_services() {
+            return false;
+        }
+        if self.expanded.contains(&p.pid) {
+            return true;
+        }
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return false;
+        }
+        p.services.iter().any(|s| {
+            s.display_name.to_lowercase().contains(&q) || s.name.to_lowercase().contains(&q)
+        })
     }
 
     fn walk_tree(
@@ -560,24 +596,144 @@ impl WorkspaceView {
         by_pid: &HashMap<Pid, ProcessInfo>,
         kids: &HashMap<Pid, Vec<Pid>>,
         mem_peak: u64,
+        query: &str,
         out: &mut Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) {
         let Some(proc_) = by_pid.get(&pid) else {
             return;
         };
-        let has_kids = kids.get(&pid).map(|k| !k.is_empty()).unwrap_or(false);
+        let has_proc_kids = kids.get(&pid).map(|k| !k.is_empty()).unwrap_or(false);
+        let has_expand = has_proc_kids || proc_.has_services();
+        let show_services = self.show_process_services(proc_, query);
+        let open = self.expanded.contains(&pid) || show_services;
         out.push(
-            self.process_row(proc_, depth, has_kids, mem_peak, cx)
+            self.process_row(proc_, depth, has_expand, open, mem_peak, cx)
                 .into_any_element(),
         );
-        if has_kids && self.expanded.contains(&pid) {
-            if let Some(children) = kids.get(&pid) {
-                for child in children {
-                    self.walk_tree(*child, depth + 1, by_pid, kids, mem_peak, out, cx);
+        if open {
+            // Task Manager order: hosted services first, then child processes.
+            if show_services {
+                for svc in &proc_.services {
+                    out.push(
+                        self.service_row(pid, svc, depth + 1, cx)
+                            .into_any_element(),
+                    );
+                }
+            }
+            if has_proc_kids && self.expanded.contains(&pid) {
+                if let Some(children) = kids.get(&pid) {
+                    for child in children {
+                        self.walk_tree(
+                            *child,
+                            depth + 1,
+                            by_pid,
+                            kids,
+                            mem_peak,
+                            query,
+                            out,
+                            cx,
+                        );
+                    }
                 }
             }
         }
+    }
+
+    fn service_row(
+        &self,
+        parent_pid: Pid,
+        svc: &crate::domain::HostedService,
+        depth: u32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.selected_pid == Some(parent_pid);
+        let indent = px(14.0 * depth as f32);
+        let label = svc.label().to_string();
+        let key = svc.name.clone();
+        let row_id = format!("svc-{parent_pid}-{key}");
+
+        div()
+            .id(ElementId::Name(row_id.into()))
+            .h(px(theme::ROW_HEIGHT))
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .px_3()
+            .gap_2()
+            .border_b_1()
+            .border_color(theme::BORDER_SUBTLE)
+            .bg(if selected {
+                theme::SELECTED
+            } else {
+                theme::PANEL_BG
+            })
+            .hover(|s| s.bg(theme::HOVER))
+            .cursor_pointer()
+            .child(div().w(px(theme::COL_TREE)))
+            .child(
+                div()
+                    .w(px(theme::COL_NAME))
+                    .min_w(px(theme::COL_NAME))
+                    .max_w(px(theme::COL_NAME))
+                    .pl(indent)
+                    .overflow_hidden()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        svg()
+                            .path("icons/ui/cog.svg")
+                            .size(px(14.))
+                            .text_color(theme::TEXT_MUTED)
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_sm()
+                            .text_color(theme::TEXT_MUTED)
+                            .whitespace_nowrap()
+                            .child(label),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(theme::COL_PID))
+                    .min_w(px(theme::COL_PID)),
+            )
+            .child(
+                div()
+                    .w(px(theme::COL_CPU))
+                    .min_w(px(theme::COL_CPU)),
+            )
+            .child(
+                div()
+                    .w(px(theme::COL_MEM))
+                    .min_w(px(theme::COL_MEM)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(80.))
+                    .overflow_hidden()
+                    .text_xs()
+                    .text_color(theme::TEXT_MUTED)
+                    .whitespace_nowrap()
+                    .child(key),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.selected_pid != Some(parent_pid) {
+                    this.detail_copy = None;
+                }
+                this.selected_pid = Some(parent_pid);
+                this.detail_open = true;
+                this.store
+                    .update(cx, |s, cx| s.load_process_files(parent_pid, cx));
+                cx.notify();
+            }))
     }
 
     fn process_row(
@@ -585,13 +741,13 @@ impl WorkspaceView {
         p: &ProcessInfo,
         depth: u32,
         has_kids: bool,
+        expanded: bool,
         mem_peak: u64,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.selected_pid == Some(p.pid);
         let pid = p.pid;
         let name = p.label().to_string();
-        let expanded = self.expanded.contains(&pid);
         let indent = px(14.0 * depth as f32);
         let cpu_bg = theme::cpu_heat(p.cpu_percent);
         let mem_bg = theme::mem_heat(p.memory_bytes, mem_peak);
@@ -761,10 +917,17 @@ impl WorkspaceView {
                         s.push_str(d);
                     }
                 }
-                for svc in &p.service_names {
-                    if !svc.is_empty() && !s.to_lowercase().contains(&svc.to_lowercase()) {
+                for svc in &p.services {
+                    let lab = svc.label();
+                    if !lab.is_empty() && !s.to_lowercase().contains(&lab.to_lowercase()) {
                         s.push(' ');
-                        s.push_str(svc);
+                        s.push_str(lab);
+                    }
+                    if !svc.name.is_empty()
+                        && !s.to_lowercase().contains(&svc.name.to_lowercase())
+                    {
+                        s.push(' ');
+                        s.push_str(&svc.name);
                     }
                 }
                 (p.pid, s)

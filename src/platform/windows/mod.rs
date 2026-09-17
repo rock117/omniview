@@ -1,5 +1,6 @@
 mod dns;
 mod handle;
+pub(crate) mod icon;
 mod net;
 mod process;
 mod proxy;

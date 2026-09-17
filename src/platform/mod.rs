@@ -77,6 +77,20 @@ pub fn services() -> PlatformServices {
     }
 }
 
+/// Extract an executable's icon as `(width, height, straight RGBA)`.
+/// `None` when unavailable (unsupported platform, missing icon, protected file).
+pub fn extract_icon_rgba(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
+    #[cfg(windows)]
+    {
+        windows::icon::extract_icon_rgba(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 pub fn config_dir() -> std::path::PathBuf {
     #[cfg(windows)]
     {

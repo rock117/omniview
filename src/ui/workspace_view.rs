@@ -58,6 +58,8 @@ pub struct WorkspaceView {
     detail_edit: TextEdit,
     proc_cols: ProcessColumnWidths,
     col_resize: Option<ColResizeDrag>,
+    /// exe path → extracted icon (None = tried, unavailable / still loading).
+    icons: HashMap<std::path::PathBuf, Option<Arc<RenderImage>>>,
     input_bounds: Option<Bounds<Pixels>>,
     input_selecting: bool,
     focus: FocusHandle,
@@ -89,6 +91,7 @@ impl WorkspaceView {
             detail_edit: TextEdit::default(),
             proc_cols,
             col_resize: None,
+            icons: HashMap::new(),
             input_bounds: None,
             input_selecting: false,
             focus,
@@ -113,6 +116,7 @@ impl WorkspaceView {
                         this.sync_detail_edit(cx);
                     }
                 }
+                this.load_missing_icons(cx);
                 cx.notify();
             }
         }));
@@ -231,6 +235,54 @@ impl WorkspaceView {
                 self.detail_edit.clear();
             }
         }
+    }
+
+    /// Extract icons for newly seen exe paths in the background (Task Manager style).
+    fn load_missing_icons(&mut self, cx: &mut Context<Self>) {
+        let snap = self.snapshot(cx);
+        let missing: HashSet<std::path::PathBuf> = snap
+            .processes
+            .iter()
+            .filter_map(|p| p.exe_path.as_ref())
+            .map(std::path::PathBuf::from)
+            .filter(|p| !self.icons.contains_key(p))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        for p in &missing {
+            self.icons.insert(p.clone(), None); // reserve while loading
+        }
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_spawn(async move {
+                    missing
+                        .into_iter()
+                        .filter_map(|p| {
+                            crate::platform::extract_icon_rgba(&p)
+                                .map(|(w, h, rgba)| (p, w, h, rgba))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let mut changed = false;
+                for (p, w, h, rgba) in results {
+                    if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {
+                        this.icons.insert(
+                            p,
+                            Some(Arc::new(RenderImage::new(vec![image::Frame::new(img)]))),
+                        );
+                        changed = true;
+                    }
+                }
+                if changed {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -835,6 +887,10 @@ impl WorkspaceView {
         let selected = self.selected_pid == Some(p.pid);
         let pid = p.pid;
         let name = p.label().to_string();
+        let icon = p
+            .exe_path
+            .as_deref()
+            .and_then(|path| self.icons.get(std::path::Path::new(path)).cloned().flatten());
         let indent = px(14.0 * depth as f32);
         let cpu_bg = theme::cpu_heat(p.cpu_percent);
         let mem_bg = theme::mem_heat(p.memory_bytes, mem_peak);
@@ -907,11 +963,19 @@ impl WorkspaceView {
                     .min_w(px(cols.name))
                     .max_w(px(cols.name))
                     .pl(indent)
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .overflow_hidden()
                     .text_sm()
                     .text_color(theme::TEXT)
-                    .whitespace_nowrap()
-                    .child(highlight_el(&name, query)),
+                    .child(process_icon_el(icon.as_ref()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(highlight_el(&name, query)),
+                    ),
             )
             .child(
                 div()
@@ -1756,6 +1820,9 @@ impl WorkspaceView {
         let name = proc_
             .map(|p| p.label().to_string())
             .unwrap_or_else(|| "?".into());
+        let icon = proc_
+            .and_then(|p| p.exe_path.as_deref())
+            .and_then(|path| self.icons.get(std::path::Path::new(path)).cloned().flatten());
 
         div()
             .w_full()
@@ -1775,6 +1842,7 @@ impl WorkspaceView {
                     .gap_2()
                     .border_b_1()
                     .border_color(theme::BORDER_SUBTLE)
+                    .child(process_icon_el(icon.as_ref()))
                     .child(
                         div()
                             .text_sm()
@@ -2859,6 +2927,22 @@ fn cmp_proc(
 #[allow(dead_code)]
 fn _listen() -> SocketState {
     SocketState::Listen
+}
+
+/// Task Manager style icon before the process name; generic placeholder when unavailable.
+fn process_icon_el(icon: Option<&Arc<RenderImage>>) -> AnyElement {
+    match icon {
+        Some(icon_img) => img(icon_img.clone())
+            .size(px(16.))
+            .flex_shrink_0()
+            .into_any_element(),
+        None => svg()
+            .path("icons/ui/app.svg")
+            .size(px(14.))
+            .text_color(theme::TEXT_MUTED)
+            .flex_shrink_0()
+            .into_any_element(),
+    }
 }
 
 /// Split `text` around the first case-insensitive occurrence of `query`.

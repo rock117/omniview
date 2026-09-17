@@ -101,6 +101,7 @@ pub fn sort_processes(list: &mut [ProcessInfo], key: ProcessSortKey, dir: SortDi
 pub fn filter_processes<'a>(
     list: &'a [ProcessInfo],
     query: &str,
+    local_ports_by_pid: &std::collections::HashMap<Pid, std::collections::HashSet<u16>>,
 ) -> Vec<&'a ProcessInfo> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -115,6 +116,9 @@ pub fn filter_processes<'a>(
                 || p.services.iter().any(|s| {
                     s.display_name.to_lowercase().contains(&q)
                         || s.name.to_lowercase().contains(&q)
+                })
+                || local_ports_by_pid.get(&p.pid).is_some_and(|ports| {
+                    ports.iter().any(|pt| pt.to_string().starts_with(&q))
                 })
         })
         .collect()
@@ -151,5 +155,56 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.0} KB", b / KB)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn proc(pid: Pid, name: &str) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            parent_pid: None,
+            name: name.into(),
+            display_name: None,
+            services: Vec::new(),
+            exe_path: None,
+            cmd_line: None,
+            user: None,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+        }
+    }
+
+    fn ports(map: &[(Pid, &[u16])]) -> HashMap<Pid, HashSet<u16>> {
+        map.iter()
+            .map(|(pid, ps)| (*pid, ps.iter().copied().collect()))
+            .collect()
+    }
+
+    #[test]
+    fn search_matches_local_port_prefix() {
+        let list = vec![proc(1, "app.exe"), proc(2, "other.exe")];
+        let idx = ports(&[(1, &[80u16, 7890]), (2, &[443])]);
+
+        // "78" prefix-matches 7890 (not 80, not 443).
+        let hits = filter_processes(&list, "78", &idx);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].pid, 1);
+
+        // "4" prefix-matches 443.
+        let hits = filter_processes(&list, "4", &idx);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].pid, 2);
+
+        // Name matching still works alongside ports.
+        let hits = filter_processes(&list, "app", &idx);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].pid, 1);
+
+        // No match.
+        assert!(filter_processes(&list, "99", &idx).is_empty());
     }
 }

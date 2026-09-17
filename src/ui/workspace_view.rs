@@ -7,9 +7,9 @@ use gpui::*;
 use crate::collect::{PendingAction, SnapshotEvent, SnapshotStore, SystemSnapshot};
 use crate::domain::{
     children_map, filter_dns_entries, filter_processes, filter_sockets_unified, format_bytes,
-    is_common_proxy_port, process_net_summaries, sort_processes, HealthLevel, MainPane, Pid,
-    ProcessCol, ProcessColumnWidths, ProcessInfo, ProcessSortKey, ProcessViewMode, Protocol,
-    SortDir, SocketState, REFRESH_PRESETS_MS,
+    is_common_proxy_port, local_ports_by_pid, process_net_summaries, sort_processes,
+    HealthLevel, MainPane, Pid, ProcessCol, ProcessColumnWidths, ProcessInfo, ProcessSortKey,
+    ProcessViewMode, Protocol, SortDir, SocketState, REFRESH_PRESETS_MS,
 };
 use crate::shared::actions::*;
 use crate::shared::theme;
@@ -374,10 +374,12 @@ impl WorkspaceView {
         let snap = self.snapshot(cx);
         let mut processes = snap.processes.clone();
         sort_processes(&mut processes, self.sort_key, self.sort_dir);
-        let filtered: Vec<ProcessInfo> = filter_processes(&processes, &self.process_query.text)
-            .into_iter()
-            .cloned()
-            .collect();
+        let ports_by_pid = local_ports_by_pid(&snap.sockets);
+        let filtered: Vec<ProcessInfo> =
+            filter_processes(&processes, &self.process_query.text, &ports_by_pid)
+                .into_iter()
+                .cloned()
+                .collect();
         let mem_peak = filtered
             .iter()
             .map(|p| p.memory_bytes)
@@ -392,7 +394,7 @@ impl WorkspaceView {
             .child(text_input_box(
                 "proc-q",
                 &self.process_query,
-                "搜索进程名/显示名",
+                "搜索名称/服务/本地端口",
                 self.active_field == ActiveField::Process,
                 px(280.),
                 ActiveField::Process,

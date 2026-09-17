@@ -160,6 +160,21 @@ pub fn filter_sockets_unified<'a>(
         .collect()
 }
 
+/// Local ports occupied per pid (any state, port 0 excluded), for process search.
+pub fn local_ports_by_pid(
+    sockets: &[SocketRow],
+) -> std::collections::HashMap<Pid, std::collections::HashSet<u16>> {
+    let mut out: std::collections::HashMap<Pid, std::collections::HashSet<u16>> =
+        std::collections::HashMap::new();
+    for s in sockets {
+        let port = s.local_port();
+        if port != 0 {
+            out.entry(s.pid).or_default().insert(port);
+        }
+    }
+    out
+}
+
 /// Compact per-process network summaries for the process table.
 ///
 /// Includes listen ports (TCP LISTEN + UDP binds) and ESTABLISHED remotes.

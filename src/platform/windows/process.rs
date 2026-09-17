@@ -472,7 +472,7 @@ mod tests {
             "expected Antimalware FileDescription, got {:?}",
             ms.display_name
         );
-        let hits = filter_processes(&list, "anti");
+        let hits = filter_processes(&list, "anti", &std::collections::HashMap::new());
         assert!(
             hits.iter().any(|p| p.pid == ms.pid),
             "search anti should include MsMpEng"

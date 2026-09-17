@@ -2476,6 +2476,13 @@ fn text_input_box(
     cx: &mut Context<WorkspaceView>,
 ) -> impl IntoElement {
     let entity = cx.entity();
+    let has_text = !edit.text.is_empty();
+    let clear_id = match field {
+        ActiveField::Process => "proc-q-clear",
+        ActiveField::Port => "port-q-clear",
+        ActiveField::File => "file-q-clear",
+        ActiveField::Dns => "dns-q-clear",
+    };
     div()
         .id(id)
         .w(width)
@@ -2496,7 +2503,44 @@ fn text_input_box(
         .text_sm()
         .cursor_text()
         .relative()
-        .child(edit.render_content(active, placeholder))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(edit.render_content(active, placeholder)),
+        )
+        .when(has_text, |el| {
+            el.child(
+                div()
+                    .id(clear_id)
+                    .flex_shrink_0()
+                    .ml_1()
+                    .size(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(theme::RADIUS_SM))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::HOVER))
+                    .child(
+                        svg()
+                            .path("icons/ui/x.svg")
+                            .size(px(12.))
+                            .text_color(theme::TEXT_MUTED),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.active_field = field;
+                            this.focus.focus(window);
+                            this.clear_active();
+                            this.input_selecting = false;
+                            cx.notify();
+                        }),
+                    ),
+            )
+        })
         .child(
             canvas(
                 {

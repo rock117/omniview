@@ -417,7 +417,15 @@ impl WorkspaceView {
                     this.view_mode = ProcessViewMode::Tree;
                     cx.notify();
                 }),
-            ));
+            ))
+            .when(!self.process_query.text.trim().is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::TEXT_MUTED)
+                        .child(format!("{} / {}", filtered.len(), processes.len())),
+                )
+            });
 
         let query = self.process_query.text.clone();
         let net_by_pid = process_net_summaries(&snap.sockets, 3);
@@ -600,13 +608,13 @@ impl WorkspaceView {
             let has_expand = p.has_services();
             let open = self.expanded.contains(&p.pid) || self.show_process_services(p, query);
             out.push(
-                self.process_row(p, 0, has_expand, open, mem_peak, net_by_pid, cx)
+                self.process_row(p, 0, has_expand, open, mem_peak, net_by_pid, query, cx)
                     .into_any_element(),
             );
             if has_expand && open {
                 for svc in &p.services {
                     out.push(
-                        self.service_row(p.pid, svc, 1, cx)
+                        self.service_row(p.pid, svc, 1, query, cx)
                             .into_any_element(),
                     );
                 }
@@ -693,7 +701,7 @@ impl WorkspaceView {
         let show_services = self.show_process_services(proc_, query);
         let open = self.expanded.contains(&pid) || show_services;
         out.push(
-            self.process_row(proc_, depth, has_expand, open, mem_peak, net_by_pid, cx)
+            self.process_row(proc_, depth, has_expand, open, mem_peak, net_by_pid, query, cx)
                 .into_any_element(),
         );
         if open {
@@ -701,7 +709,7 @@ impl WorkspaceView {
             if show_services {
                 for svc in &proc_.services {
                     out.push(
-                        self.service_row(pid, svc, depth + 1, cx)
+                        self.service_row(pid, svc, depth + 1, query, cx)
                             .into_any_element(),
                     );
                 }
@@ -731,6 +739,7 @@ impl WorkspaceView {
         parent_pid: Pid,
         svc: &crate::domain::HostedService,
         depth: u32,
+        query: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.selected_pid == Some(parent_pid);
@@ -783,7 +792,7 @@ impl WorkspaceView {
                             .text_sm()
                             .text_color(theme::TEXT_MUTED)
                             .whitespace_nowrap()
-                            .child(label),
+                            .child(highlight_el(&label, query)),
                     ),
             )
             .child(div().w(px(cols.pid)).min_w(px(cols.pid)))
@@ -820,6 +829,7 @@ impl WorkspaceView {
         expanded: bool,
         mem_peak: u64,
         net_by_pid: &HashMap<Pid, String>,
+        query: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.selected_pid == Some(p.pid);
@@ -901,7 +911,7 @@ impl WorkspaceView {
                     .text_sm()
                     .text_color(theme::TEXT)
                     .whitespace_nowrap()
-                    .child(name.clone()),
+                    .child(highlight_el(&name, query)),
             )
             .child(
                 div()
@@ -954,7 +964,7 @@ impl WorkspaceView {
                     .text_color(theme::TEXT_MUTED)
                     .font_family("Consolas")
                     .whitespace_nowrap()
-                    .child(net),
+                    .child(highlight_ports_el(&net, query)),
             )
             .child(
                 div()
@@ -2849,4 +2859,76 @@ fn cmp_proc(
 #[allow(dead_code)]
 fn _listen() -> SocketState {
     SocketState::Listen
+}
+
+/// Split `text` around the first case-insensitive occurrence of `query`.
+fn split_highlight(text: &str, query: &str) -> Option<(String, String, String)> {
+    let q: Vec<char> = query.trim().to_lowercase().chars().collect();
+    if q.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = text.to_lowercase().chars().collect();
+    // Lowercasing can change char count for exotic chars; skip highlight then.
+    if lower.len() != chars.len() {
+        return None;
+    }
+    lower
+        .windows(q.len())
+        .position(|w| w == q.as_slice())
+        .map(|start| {
+            let before: String = chars[..start].iter().collect();
+            let matched: String = chars[start..start + q.len()].iter().collect();
+            let after: String = chars[start + q.len()..].iter().collect();
+            (before, matched, after)
+        })
+}
+
+/// Text with the first case-insensitive query occurrence accented.
+fn highlight_el(text: &str, query: &str) -> AnyElement {
+    match split_highlight(text, query) {
+        Some((before, matched, after)) => div()
+            .flex()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(div().child(before))
+            .child(div().text_color(theme::ACCENT).child(matched))
+            .child(div().overflow_hidden().child(after))
+            .into_any_element(),
+        None => div().child(text.to_string()).into_any_element(),
+    }
+}
+
+/// Net summary with the port prefix starting with the query accented.
+///
+/// Summary parts are joined by double spaces; each starts with a local
+/// port number (plain listen port or `local→remote`), matching the
+/// prefix semantics of the port search.
+fn highlight_ports_el(summary: &str, query: &str) -> AnyElement {
+    let q = query.trim();
+    if q.is_empty() || summary.is_empty() {
+        return div().child(summary.to_string()).into_any_element();
+    }
+    let qlen = q.chars().count();
+    let mut row = div()
+        .flex()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap();
+    for (i, part) in summary.split("  ").enumerate() {
+        if i > 0 {
+            row = row.child(div().child("  "));
+        }
+        if part.starts_with(q) {
+            let head: String = part.chars().take(qlen).collect();
+            let rest: String = part.chars().skip(qlen).collect();
+            row = row
+                .child(div().text_color(theme::ACCENT).child(head))
+                .child(div().overflow_hidden().child(rest));
+        } else {
+            row = row.child(div().overflow_hidden().child(part.to_string()));
+        }
+    }
+    row.into_any_element()
 }
